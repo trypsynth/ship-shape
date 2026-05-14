@@ -4,7 +4,7 @@ use std::{
 	cell::RefCell,
 	env,
 	path::PathBuf,
-	process,
+	process::{self, Command},
 	sync::{
 		Arc,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -35,6 +35,7 @@ impl WxWidget for ParentWindow {
 /// Convert markdown to plain text suitable for display in a read-only `TextCtrl`.
 ///
 /// Preserves paragraph breaks, headings, list items, and inline code; strips all other markdown syntax.
+#[must_use]
 pub fn markdown_to_text(markdown: &str) -> String {
 	let mut text = String::new();
 	let parser = Parser::new(markdown);
@@ -160,8 +161,9 @@ fn present_update_result(
 					wxdragon::call_after(Box::new(move || {
 						ACTIVE_PROGRESS.with(|p| {
 							if let Some(dialog) = p.borrow().as_ref() {
-								if t > 0 {
-									let percent = i32::try_from(d.saturating_mul(100) / t).unwrap_or(i32::MAX);
+								if let Some(percent) =
+									d.saturating_mul(100).checked_div(t).and_then(|v| i32::try_from(v).ok())
+								{
 									dialog.update(percent, None);
 								} else {
 									dialog.pulse(None);
@@ -271,7 +273,7 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 				path.display(),
 				current_exe.display()
 			);
-			if let Err(e) = process::Command::new("powershell.exe")
+			if let Err(e) = Command::new("powershell.exe")
 				.arg("-NoProfile")
 				.arg("-ExecutionPolicy")
 				.arg("Bypass")
@@ -299,7 +301,7 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 				path.display(),
 				current_exe.display()
 			);
-			if let Err(e) = process::Command::new("powershell.exe")
+			if let Err(e) = Command::new("powershell.exe")
 				.arg("-NoProfile")
 				.arg("-ExecutionPolicy")
 				.arg("Bypass")

@@ -1,4 +1,5 @@
 #![warn(clippy::all, clippy::cargo, clippy::nursery, clippy::pedantic)]
+#![allow(clippy::cargo_common_metadata)] // README is intentionally omitted
 
 use std::{
 	env,
@@ -114,12 +115,18 @@ impl Display for UpdateError {
 
 impl Error for UpdateError {}
 
-/// Download `url`, verify its minisign signature fetched from `signature_url`, and return the
-/// local path of the verified file. `progress_callback(downloaded, total)` is called after each
-/// chunk; `total` may be 0 if the server does not send `Content-Length`.
+/// Download `url`, verify its minisign signature, and return the local path of the verified file.
+///
+/// The signature is fetched from `signature_url`. `progress_callback(downloaded, total)` is called
+/// after each chunk; `total` may be 0 if the server does not send `Content-Length`.
 ///
 /// `.exe` files land in the system temp directory; `.zip` files land next to the current
 /// executable so that the extraction script can overwrite in-place.
+///
+/// # Errors
+///
+/// Returns [`UpdateError`] on network failure, HTTP error, I/O error, or signature verification
+/// failure.
 pub fn download_update_file(
 	config: &UpdaterConfig,
 	url: &str,
@@ -127,14 +134,14 @@ pub fn download_update_file(
 	mut progress_callback: impl FnMut(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
 	let http = build_agent(Some(Duration::from_mins(10)));
-	let sig_resp = http.get(signature_url).header("User-Agent", &config.user_agent).call().map_err(map_http_err)?;
+	let sig_resp = http.get(signature_url).header("User-Agent", &config.user_agent).call().map_err(|e| map_http_err(&e))?;
 	let mut sig_bytes = Vec::new();
 	sig_resp
 		.into_body()
 		.as_reader()
 		.read_to_end(&mut sig_bytes)
 		.map_err(|e| UpdateError::NetworkError(format!("Failed to read signature: {e}")))?;
-	let resp = http.get(url).header("User-Agent", &config.user_agent).call().map_err(map_http_err)?;
+	let resp = http.get(url).header("User-Agent", &config.user_agent).call().map_err(|e| map_http_err(&e))?;
 	let total_size = resp
 		.headers()
 		.get("Content-Length")
@@ -195,10 +202,15 @@ pub fn download_update_file(
 
 /// Check whether an update is available.
 ///
-/// - `current_version` — semver string used for `UpdateChannel::Stable` comparisons.
-/// - `current_commit` — short or full git commit hash used for `UpdateChannel::Dev` comparisons.
+/// - `current_version`: semver string used for [`UpdateChannel::Stable`] comparisons.
+/// - `current_commit`: short or full git commit hash used for [`UpdateChannel::Dev`] comparisons.
 /// - `is_installer` — selects between `{app_name}_setup.exe` and `{app_name}.zip` as the
 ///   preferred asset.
+///
+/// # Errors
+///
+/// Returns [`UpdateError`] on network failure, HTTP error, invalid version strings, or missing
+/// release assets.
 pub fn check_for_updates(
 	config: &UpdaterConfig,
 	current_version: &str,
@@ -293,7 +305,7 @@ fn fetch_release_url(config: &UpdaterConfig, url: &str) -> Result<GithubRelease,
 		.header("User-Agent", &config.user_agent)
 		.header("Accept", "application/vnd.github+json")
 		.call()
-		.map_err(map_http_err)?;
+		.map_err(|e| map_http_err(&e))?;
 	resp.body_mut()
 		.read_json::<GithubRelease>()
 		.map_err(|e| UpdateError::InvalidResponse(format!("Failed to parse release JSON: {e}")))
@@ -307,9 +319,9 @@ fn build_agent(global_timeout: Option<Duration>) -> Agent {
 	Agent::new_with_config(builder.build())
 }
 
-fn map_http_err(err: ureq::Error) -> UpdateError {
+fn map_http_err(err: &ureq::Error) -> UpdateError {
 	match err {
-		ureq::Error::StatusCode(code) => UpdateError::HttpError(i32::from(code)),
+		ureq::Error::StatusCode(code) => UpdateError::HttpError(i32::from(*code)),
 		_ => UpdateError::NetworkError(err.to_string()),
 	}
 }
