@@ -14,7 +14,7 @@ use std::{
 };
 
 use pulldown_cmark::{Event, Parser, TagEnd};
-use wxdragon::{ffi, prelude::*, window::WxWidget};
+use wxdragon::{ffi, prelude::*, translations::translate as t, window::WxWidget};
 
 use crate::{UpdateChannel, UpdateCheckOutcome, UpdateError, UpdaterConfig, check_for_updates, download_update_file};
 
@@ -41,7 +41,7 @@ pub fn markdown_to_text(markdown: &str) -> String {
 	let parser = Parser::new(markdown);
 	for event in parser {
 		match event {
-			Event::Text(t) | Event::Code(t) => text.push_str(&t),
+			Event::Text(s) | Event::Code(s) => text.push_str(&s),
 			Event::End(TagEnd::Paragraph | TagEnd::Heading(_)) => text.push_str("\n\n"),
 			Event::End(TagEnd::Item) => text.push('\n'),
 			_ => {}
@@ -55,18 +55,20 @@ pub fn markdown_to_text(markdown: &str) -> String {
 /// `app_display_name` appears in the body label (e.g. `"A new version of My App is available."`).
 pub fn show_update_dialog(parent: &dyn WxWidget, new_version: &str, changelog: &str, app_display_name: &str) -> bool {
 	const PADDING: i32 = 10;
-	let title = format!("Update to {new_version}");
+	let title = t("Update to %s").replace("%s", new_version);
 	let dialog = Dialog::builder(parent, &title).build();
 	let panel = Panel::builder(&dialog).build();
-	let label = format!("A new version of {app_display_name} is available. Here's what's new:");
+	let label = t("A new version of %s is available. Here's what's new:").replace("%s", app_display_name);
 	let message = StaticText::builder(&panel).with_label(&label).build();
 	let changelog_ctrl = TextCtrl::builder(&panel)
 		.with_value(changelog)
 		.with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::Rich2)
 		.with_size(Size::new(500, 300))
 		.build();
-	let yes_button = Button::builder(&panel).with_id(ID_OK).with_label("&Yes").build();
-	let no_button = Button::builder(&panel).with_id(ID_CANCEL).with_label("&No").build();
+	let yes_label = t("&Yes");
+	let no_label = t("&No");
+	let yes_button = Button::builder(&panel).with_id(ID_OK).with_label(&yes_label).build();
+	let no_button = Button::builder(&panel).with_id(ID_CANCEL).with_label(&no_label).build();
 	dialog.set_escape_id(ID_CANCEL);
 	dialog.set_affirmative_id(ID_OK);
 	let content_sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -129,8 +131,11 @@ fn present_update_result(
 			let latest_version =
 				if result.latest_version.is_empty() { current_version.to_string() } else { result.latest_version };
 			let plain_notes = markdown_to_text(&result.release_notes);
-			let release_notes =
-				if plain_notes.trim().is_empty() { "No release notes provided.".to_string() } else { plain_notes };
+			let release_notes = if plain_notes.trim().is_empty() {
+				t("No release notes provided.")
+			} else {
+				plain_notes
+			};
 			if !show_update_dialog(&parent, &latest_version, &release_notes, &config.app_display_name)
 				|| result.download_url.is_empty()
 			{
@@ -138,8 +143,9 @@ fn present_update_result(
 			}
 			let download_url = result.download_url;
 			let signature_url = result.signature_url;
-			let progress_title = format!("{} Update", config.app_display_name);
-			let progress = ProgressDialog::builder(&parent, &progress_title, "Downloading update...", 100)
+			let progress_title = t("%s Update").replace("%s", &config.app_display_name);
+			let downloading_msg = t("Downloading update...");
+			let progress = ProgressDialog::builder(&parent, &progress_title, &downloading_msg, 100)
 				.with_style(
 					ProgressDialogStyle::AutoHide | ProgressDialogStyle::AppModal | ProgressDialogStyle::RemainingTime,
 				)
@@ -195,11 +201,12 @@ fn present_update_result(
 		Ok(UpdateCheckOutcome::UpToDate(ver)) => {
 			if !silent {
 				let msg = if ver.trim().is_empty() {
-					"No updates available.".to_string()
+					t("No updates available.")
 				} else {
-					format!("No updates available. Latest version: {ver}")
+					t("No updates available. Latest version: %s").replace("%s", &ver)
 				};
-				let dialog = MessageDialog::builder(&parent, &msg, "Info")
+				let title = t("Info");
+				let dialog = MessageDialog::builder(&parent, &msg, &title)
 					.with_style(
 						MessageDialogStyle::OK | MessageDialogStyle::IconInformation | MessageDialogStyle::Centre,
 					)
@@ -209,14 +216,16 @@ fn present_update_result(
 		}
 		Err(e) => {
 			if !silent {
+				let err_title = t("Error");
 				let (msg, title) = match &e {
 					UpdateError::VerificationError(m) => (
-						format!("Security verification failed. The update might have been tampered with: {m}"),
-						"Security Error",
+						t("Security verification failed. The update might have been tampered with: %s")
+							.replace("%s", m),
+						t("Security Error"),
 					),
-					_ => (e.to_string(), "Error"),
+					_ => (e.to_string(), err_title),
 				};
-				let dialog = MessageDialog::builder(&parent, &msg, title)
+				let dialog = MessageDialog::builder(&parent, &msg, &title)
 					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError | MessageDialogStyle::Centre)
 					.build();
 				dialog.show_modal();
@@ -228,10 +237,12 @@ fn present_update_result(
 fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 	let handle = window_handle as *mut ffi::wxd_Window_t;
 	let parent = ParentWindow { handle };
+	let err_title = t("Error");
 	let path = match result {
 		Ok(p) => p,
 		Err(e) => {
-			let dialog = MessageDialog::builder(&parent, &format!("Update failed: {e}"), "Error")
+			let msg = format!("{}: {e}", t("Update failed"));
+			let dialog = MessageDialog::builder(&parent, &msg, &err_title)
 				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
 				.build();
 			dialog.show_modal();
@@ -243,13 +254,12 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 	#[cfg(not(target_os = "windows"))]
 	{
 		let _ = (is_exe, is_zip);
-		let dialog = MessageDialog::builder(
-			&parent,
-			&format!("Update downloaded to: {}\nPlease install it manually.", path.display()),
-			"Update Ready",
-		)
-		.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
-		.build();
+		let msg =
+			t("Update downloaded to: %s\nPlease install it manually.").replace("%s", &path.display().to_string());
+		let ready_title = t("Update Ready");
+		let dialog = MessageDialog::builder(&parent, &msg, &ready_title)
+			.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
+			.build();
 		dialog.show_modal();
 		return;
 	}
@@ -258,7 +268,8 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 		let current_exe = match env::current_exe() {
 			Ok(p) => p,
 			Err(e) => {
-				let dialog = MessageDialog::builder(&parent, &format!("Failed to get current exe path: {e}"), "Error")
+				let msg = format!("{}: {e}", t("Failed to get current exe path"));
+				let dialog = MessageDialog::builder(&parent, &msg, &err_title)
 					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
 					.build();
 				dialog.show_modal();
@@ -282,10 +293,10 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 				.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
 				.spawn()
 			{
-				let dialog =
-					MessageDialog::builder(&parent, &format!("Failed to launch installer script: {e}"), "Error")
-						.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
-						.build();
+				let msg = format!("{}: {e}", t("Failed to launch installer script"));
+				let dialog = MessageDialog::builder(&parent, &msg, &err_title)
+					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+					.build();
 				dialog.show_modal();
 				return;
 			}
@@ -310,7 +321,8 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 				.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
 				.spawn()
 			{
-				let dialog = MessageDialog::builder(&parent, &format!("Failed to launch update script: {e}"), "Error")
+				let msg = format!("{}: {e}", t("Failed to launch update script"));
+				let dialog = MessageDialog::builder(&parent, &msg, &err_title)
 					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
 					.build();
 				dialog.show_modal();
@@ -318,7 +330,8 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 			}
 			process::exit(0);
 		} else {
-			let dialog = MessageDialog::builder(&parent, "Unknown update file format.", "Error")
+			let msg = t("Unknown update file format.");
+			let dialog = MessageDialog::builder(&parent, &msg, &err_title)
 				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
 				.build();
 			dialog.show_modal();
