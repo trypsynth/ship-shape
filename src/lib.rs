@@ -1,3 +1,5 @@
+#![warn(clippy::all, clippy::cargo, clippy::nursery, clippy::pedantic)]
+
 use std::{
 	env,
 	error::Error,
@@ -124,7 +126,7 @@ pub fn download_update_file(
 	signature_url: &str,
 	mut progress_callback: impl FnMut(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
-	let http = build_agent(Some(Duration::from_secs(600)));
+	let http = build_agent(Some(Duration::from_mins(10)));
 	let sig_resp = http.get(signature_url).header("User-Agent", &config.user_agent).call().map_err(map_http_err)?;
 	let mut sig_bytes = Vec::new();
 	sig_resp
@@ -140,7 +142,7 @@ pub fn download_update_file(
 		.and_then(|v| v.parse::<u64>().ok())
 		.unwrap_or(0);
 	let fname = url.rsplit('/').next().unwrap_or("update.bin");
-	let ext = Path::new(fname).extension().map(|e| e.to_ascii_lowercase());
+	let ext = Path::new(fname).extension().map(std::ffi::OsStr::to_ascii_lowercase);
 	let is_exe = ext.as_deref() == Some(std::ffi::OsStr::new("exe"));
 	let is_zip = ext.as_deref() == Some(std::ffi::OsStr::new("zip"));
 	let mut dest_dir = if is_exe {
