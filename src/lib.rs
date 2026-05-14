@@ -134,7 +134,8 @@ pub fn download_update_file(
 	mut progress_callback: impl FnMut(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
 	let http = build_agent(Some(Duration::from_mins(10)));
-	let sig_resp = http.get(signature_url).header("User-Agent", &config.user_agent).call().map_err(|e| map_http_err(&e))?;
+	let sig_resp =
+		http.get(signature_url).header("User-Agent", &config.user_agent).call().map_err(|e| map_http_err(&e))?;
 	let mut sig_bytes = Vec::new();
 	sig_resp
 		.into_body()
