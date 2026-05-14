@@ -1,0 +1,17 @@
+[package]
+name = "ship-shape"
+version = "0.1.0"
+edition = "2024"
+description = "Universal auto-updater for wxDragon desktop apps"
+license = "MIT"
+
+[features]
+default = []
+ui = ["dep:pulldown-cmark", "dep:wxdragon"]
+
+[dependencies]
+minisign-verify = "0.2.5"
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
+wxdragon = { version = "0.9", optional = true }

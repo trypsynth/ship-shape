@@ -1,0 +1,325 @@
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::{
+	cell::RefCell,
+	env,
+	path::PathBuf,
+	process,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
+	thread,
+	time::Duration,
+};
+
+use pulldown_cmark::{Event, Parser, TagEnd};
+use wxdragon::{ffi, prelude::*, window::WxWidget};
+
+use crate::{UpdateChannel, UpdateCheckOutcome, UpdateError, UpdaterConfig, check_for_updates, download_update_file};
+
+thread_local! {
+	static ACTIVE_PROGRESS: RefCell<Option<ProgressDialog>> = const { RefCell::new(None) };
+}
+
+struct ParentWindow {
+	handle: *mut ffi::wxd_Window_t,
+}
+
+impl WxWidget for ParentWindow {
+	fn handle_ptr(&self) -> *mut ffi::wxd_Window_t {
+		self.handle
+	}
+}
+
+/// Convert markdown to plain text suitable for display in a read-only `TextCtrl`.
+///
+/// Preserves paragraph breaks, headings, list items, and inline code; strips all other markdown syntax.
+pub fn markdown_to_text(markdown: &str) -> String {
+	let mut text = String::new();
+	let parser = Parser::new(markdown);
+	for event in parser {
+		match event {
+			Event::Text(t) | Event::Code(t) => text.push_str(&t),
+			Event::End(TagEnd::Paragraph | TagEnd::Heading(_)) => text.push_str("\n\n"),
+			Event::End(TagEnd::Item) => text.push('\n'),
+			_ => {}
+		}
+	}
+	text.trim().to_string()
+}
+
+/// Show the "update available" dialog and return `true` if the user accepted.
+///
+/// `app_display_name` appears in the body label (e.g. `"A new version of My App is available."`).
+pub fn show_update_dialog(parent: &dyn WxWidget, new_version: &str, changelog: &str, app_display_name: &str) -> bool {
+	const PADDING: i32 = 10;
+	let title = format!("Update to {new_version}");
+	let dialog = Dialog::builder(parent, &title).build();
+	let panel = Panel::builder(&dialog).build();
+	let label = format!("A new version of {app_display_name} is available. Here's what's new:");
+	let message = StaticText::builder(&panel).with_label(&label).build();
+	let changelog_ctrl = TextCtrl::builder(&panel)
+		.with_value(changelog)
+		.with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::Rich2)
+		.with_size(Size::new(500, 300))
+		.build();
+	let yes_button = Button::builder(&panel).with_id(ID_OK).with_label("&Yes").build();
+	let no_button = Button::builder(&panel).with_id(ID_CANCEL).with_label("&No").build();
+	dialog.set_escape_id(ID_CANCEL);
+	dialog.set_affirmative_id(ID_OK);
+	let content_sizer = BoxSizer::builder(Orientation::Vertical).build();
+	content_sizer.add(&message, 0, SizerFlag::All, PADDING);
+	content_sizer.add(
+		&changelog_ctrl,
+		1,
+		SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+		PADDING,
+	);
+	let button_sizer = BoxSizer::builder(Orientation::Horizontal).build();
+	button_sizer.add_stretch_spacer(1);
+	button_sizer.add(&yes_button, 0, SizerFlag::Right, PADDING);
+	button_sizer.add(&no_button, 0, SizerFlag::Right, PADDING);
+	content_sizer.add_sizer(&button_sizer, 0, SizerFlag::Expand | SizerFlag::All, 0);
+	panel.set_sizer(content_sizer, true);
+	let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+	dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+	dialog.set_sizer_and_fit(dialog_sizer, true);
+	dialog.centre();
+	dialog.raise();
+	changelog_ctrl.set_focus();
+	dialog.show_modal() == ID_OK
+}
+
+/// Spawn a background thread that checks for updates and drives the entire update UI flow:
+/// update-available dialog -> progress dialog -> download + verify -> launch installer/extractor.
+///
+/// `window_handle` must be `frame.handle_ptr() as usize` and must remain valid for the lifetime of the update flow. `silent` suppresses the "you're up to date" and error dialogs while still showing the update dialog when one is found.
+pub fn run_update_check(
+	config: Arc<UpdaterConfig>,
+	window_handle: usize,
+	current_version: &str,
+	current_commit: &str,
+	is_installer: bool,
+	channel: UpdateChannel,
+	silent: bool,
+) {
+	let version = current_version.to_string();
+	let commit = current_commit.to_string();
+	thread::spawn(move || {
+		let outcome = check_for_updates(&config, &version, &commit, is_installer, channel);
+		wxdragon::call_after(Box::new(move || {
+			present_update_result(config, window_handle, outcome, silent, &version);
+		}));
+	});
+}
+
+fn present_update_result(
+	config: Arc<UpdaterConfig>,
+	window_handle: usize,
+	outcome: Result<UpdateCheckOutcome, UpdateError>,
+	silent: bool,
+	current_version: &str,
+) {
+	let handle = window_handle as *mut ffi::wxd_Window_t;
+	let parent = ParentWindow { handle };
+	match outcome {
+		Ok(UpdateCheckOutcome::UpdateAvailable(result)) => {
+			let latest_version =
+				if result.latest_version.is_empty() { current_version.to_string() } else { result.latest_version };
+			let plain_notes = markdown_to_text(&result.release_notes);
+			let release_notes =
+				if plain_notes.trim().is_empty() { "No release notes provided.".to_string() } else { plain_notes };
+			if !show_update_dialog(&parent, &latest_version, &release_notes, &config.app_display_name)
+				|| result.download_url.is_empty()
+			{
+				return;
+			}
+			let download_url = result.download_url;
+			let signature_url = result.signature_url;
+			let progress_title = format!("{} Update", config.app_display_name);
+			let progress = ProgressDialog::builder(&parent, &progress_title, "Downloading update...", 100)
+				.with_style(
+					ProgressDialogStyle::AutoHide | ProgressDialogStyle::AppModal | ProgressDialogStyle::RemainingTime,
+				)
+				.build();
+			ACTIVE_PROGRESS.with(|p| {
+				*p.borrow_mut() = Some(progress);
+			});
+			let downloaded = Arc::new(AtomicU64::new(0));
+			let total = Arc::new(AtomicU64::new(0));
+			let is_running = Arc::new(AtomicBool::new(true));
+			// Heartbeat thread: updates the progress dialog from the main thread every 200 ms.
+			let hb_downloaded = downloaded.clone();
+			let hb_total = total.clone();
+			let hb_is_running = is_running.clone();
+			thread::spawn(move || {
+				while hb_is_running.load(Ordering::Relaxed) {
+					let d = hb_downloaded.load(Ordering::Relaxed);
+					let t = hb_total.load(Ordering::Relaxed);
+					wxdragon::call_after(Box::new(move || {
+						ACTIVE_PROGRESS.with(|p| {
+							if let Some(dialog) = p.borrow().as_ref() {
+								if t > 0 {
+									let percent = i32::try_from(d.saturating_mul(100) / t).unwrap_or(i32::MAX);
+									dialog.update(percent, None);
+								} else {
+									dialog.pulse(None);
+								}
+							}
+						});
+					}));
+					thread::sleep(Duration::from_millis(200));
+				}
+			});
+			// Download thread.
+			let d_downloaded = downloaded;
+			let d_total = total;
+			let d_is_running = is_running;
+			thread::spawn(move || {
+				let res = download_update_file(&config, &download_url, &signature_url, |d, t| {
+					d_downloaded.store(d, Ordering::Relaxed);
+					d_total.store(t, Ordering::Relaxed);
+				});
+				d_is_running.store(false, Ordering::Relaxed);
+				wxdragon::call_after(Box::new(move || {
+					ACTIVE_PROGRESS.with(|p| {
+						*p.borrow_mut() = None;
+					});
+					execute_update(window_handle, res);
+				}));
+			});
+		}
+		Ok(UpdateCheckOutcome::UpToDate(ver)) => {
+			if !silent {
+				let msg = if ver.trim().is_empty() {
+					"No updates available.".to_string()
+				} else {
+					format!("No updates available. Latest version: {ver}")
+				};
+				let dialog = MessageDialog::builder(&parent, &msg, "Info")
+					.with_style(
+						MessageDialogStyle::OK | MessageDialogStyle::IconInformation | MessageDialogStyle::Centre,
+					)
+					.build();
+				dialog.show_modal();
+			}
+		}
+		Err(e) => {
+			if !silent {
+				let (msg, title) = match &e {
+					UpdateError::VerificationError(m) => (
+						format!("Security verification failed. The update might have been tampered with: {m}"),
+						"Security Error",
+					),
+					_ => (e.to_string(), "Error"),
+				};
+				let dialog = MessageDialog::builder(&parent, &msg, title)
+					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError | MessageDialogStyle::Centre)
+					.build();
+				dialog.show_modal();
+			}
+		}
+	}
+}
+
+fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
+	let handle = window_handle as *mut ffi::wxd_Window_t;
+	let parent = ParentWindow { handle };
+	let path = match result {
+		Ok(p) => p,
+		Err(e) => {
+			let dialog = MessageDialog::builder(&parent, &format!("Update failed: {e}"), "Error")
+				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+				.build();
+			dialog.show_modal();
+			return;
+		}
+	};
+	let is_exe = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+	let is_zip = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+	#[cfg(not(target_os = "windows"))]
+	{
+		let _ = (is_exe, is_zip);
+		let dialog = MessageDialog::builder(
+			&parent,
+			&format!("Update downloaded to: {}\nPlease install it manually.", path.display()),
+			"Update Ready",
+		)
+		.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
+		.build();
+		dialog.show_modal();
+		return;
+	}
+	#[cfg(target_os = "windows")]
+	{
+		let current_exe = match env::current_exe() {
+			Ok(p) => p,
+			Err(e) => {
+				let dialog = MessageDialog::builder(&parent, &format!("Failed to get current exe path: {e}"), "Error")
+					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+					.build();
+				dialog.show_modal();
+				return;
+			}
+		};
+		if is_exe {
+			let pid = process::id();
+			let script = format!(
+				"Start-Sleep -Seconds 1; Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}' -ArgumentList '/silent' -Wait; Start-Process -FilePath '{}'",
+				pid,
+				path.display(),
+				current_exe.display()
+			);
+			if let Err(e) = process::Command::new("powershell.exe")
+				.arg("-NoProfile")
+				.arg("-ExecutionPolicy")
+				.arg("Bypass")
+				.arg("-Command")
+				.arg(&script)
+				.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+				.spawn()
+			{
+				let dialog =
+					MessageDialog::builder(&parent, &format!("Failed to launch installer script: {e}"), "Error")
+						.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+						.build();
+				dialog.show_modal();
+				return;
+			}
+			process::exit(0);
+		} else if is_zip {
+			let exe_dir = current_exe.parent().unwrap_or(&current_exe);
+			let pid = process::id();
+			let script = format!(
+				"Start-Sleep -Seconds 1; Wait-Process -Id {}; Expand-Archive -Path '{}' -DestinationPath '{}' -Force; Remove-Item -Path '{}' -Force; Start-Process '{}'",
+				pid,
+				path.display(),
+				exe_dir.display(),
+				path.display(),
+				current_exe.display()
+			);
+			if let Err(e) = process::Command::new("powershell.exe")
+				.arg("-NoProfile")
+				.arg("-ExecutionPolicy")
+				.arg("Bypass")
+				.arg("-Command")
+				.arg(&script)
+				.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+				.spawn()
+			{
+				let dialog = MessageDialog::builder(&parent, &format!("Failed to launch update script: {e}"), "Error")
+					.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+					.build();
+				dialog.show_modal();
+				return;
+			}
+			process::exit(0);
+		} else {
+			let dialog = MessageDialog::builder(&parent, "Unknown update file format.", "Error")
+				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+				.build();
+			dialog.show_modal();
+		}
+	}
+}
