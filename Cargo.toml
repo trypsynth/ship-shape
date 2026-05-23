@@ -1,6 +1,6 @@
 [package]
 name = "ship-shape"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 links = "ship_shape_i18n"
 build = "build.rs"

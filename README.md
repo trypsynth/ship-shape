@@ -13,7 +13,7 @@ Auto-updater library for wxDragon desktop apps on Windows only, for now.
 
 ```toml
 [dependencies]
-ship-shape = { version = "0.1.0", features = ["ui"] }
+ship-shape = { version = "0.1.2", features = ["ui"] }
 ```
 
 ```rust
