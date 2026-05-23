@@ -147,7 +147,10 @@ fn present_update_result(
 			let downloading_msg = t("Downloading update...");
 			let progress = ProgressDialog::builder(&parent, &progress_title, &downloading_msg, 100)
 				.with_style(
-					ProgressDialogStyle::AutoHide | ProgressDialogStyle::AppModal | ProgressDialogStyle::RemainingTime,
+					ProgressDialogStyle::AutoHide
+						| ProgressDialogStyle::AppModal
+						| ProgressDialogStyle::RemainingTime
+						| ProgressDialogStyle::CanAbort,
 				)
 				.build();
 			ACTIVE_PROGRESS.with(|p| {
@@ -156,24 +159,36 @@ fn present_update_result(
 			let downloaded = Arc::new(AtomicU64::new(0));
 			let total = Arc::new(AtomicU64::new(0));
 			let is_running = Arc::new(AtomicBool::new(true));
+			let cancelled = Arc::new(AtomicBool::new(false));
 			// Heartbeat thread: updates the progress dialog from the main thread every 200 ms.
 			let hb_downloaded = downloaded.clone();
 			let hb_total = total.clone();
 			let hb_is_running = is_running.clone();
+			let hb_cancelled = cancelled.clone();
 			thread::spawn(move || {
-				while hb_is_running.load(Ordering::Relaxed) {
+				while hb_is_running.load(Ordering::Relaxed) && !hb_cancelled.load(Ordering::Relaxed) {
 					let d = hb_downloaded.load(Ordering::Relaxed);
 					let t = hb_total.load(Ordering::Relaxed);
+					let hb_cancelled_c = hb_cancelled.clone();
 					wxdragon::call_after(Box::new(move || {
 						ACTIVE_PROGRESS.with(|p| {
-							if let Some(dialog) = p.borrow().as_ref() {
-								if let Some(percent) =
-									d.saturating_mul(100).checked_div(t).and_then(|v| i32::try_from(v).ok())
-								{
-									dialog.update(percent, None);
+							let keep_going = {
+								let borrow = p.borrow();
+								if let Some(dialog) = borrow.as_ref() {
+									if let Some(percent) =
+										d.saturating_mul(100).checked_div(t).and_then(|v| i32::try_from(v).ok())
+									{
+										dialog.update(percent, None)
+									} else {
+										dialog.pulse(None)
+									}
 								} else {
-									dialog.pulse(None);
+									return;
 								}
+							};
+							if !keep_going {
+								hb_cancelled_c.store(true, Ordering::Relaxed);
+								*p.borrow_mut() = None;
 							}
 						});
 					}));
@@ -184,6 +199,7 @@ fn present_update_result(
 			let d_downloaded = downloaded;
 			let d_total = total;
 			let d_is_running = is_running;
+			let d_cancelled = cancelled;
 			thread::spawn(move || {
 				let res = download_update_file(&config, &download_url, &signature_url, |d, t| {
 					d_downloaded.store(d, Ordering::Relaxed);
@@ -194,7 +210,9 @@ fn present_update_result(
 					ACTIVE_PROGRESS.with(|p| {
 						*p.borrow_mut() = None;
 					});
-					execute_update(window_handle, res);
+					if !d_cancelled.load(Ordering::Relaxed) {
+						execute_update(window_handle, res);
+					}
 				}));
 			});
 		}
