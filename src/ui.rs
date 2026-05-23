@@ -131,11 +131,8 @@ fn present_update_result(
 			let latest_version =
 				if result.latest_version.is_empty() { current_version.to_string() } else { result.latest_version };
 			let plain_notes = markdown_to_text(&result.release_notes);
-			let release_notes = if plain_notes.trim().is_empty() {
-				t("No release notes provided.")
-			} else {
-				plain_notes
-			};
+			let release_notes =
+				if plain_notes.trim().is_empty() { t("No release notes provided.") } else { plain_notes };
 			if !show_update_dialog(&parent, &latest_version, &release_notes, &config.app_display_name)
 				|| result.download_url.is_empty()
 			{
@@ -272,8 +269,7 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 	#[cfg(not(target_os = "windows"))]
 	{
 		let _ = (is_exe, is_zip);
-		let msg =
-			t("Update downloaded to: %s\nPlease install it manually.").replace("%s", &path.display().to_string());
+		let msg = t("Update downloaded to: %s\nPlease install it manually.").replace("%s", &path.display().to_string());
 		let ready_title = t("Update Ready");
 		let dialog = MessageDialog::builder(&parent, &msg, &ready_title)
 			.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
