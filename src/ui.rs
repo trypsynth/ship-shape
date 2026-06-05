@@ -13,8 +13,9 @@ use std::{
 	time::Duration,
 };
 
+use patois::t;
 use pulldown_cmark::{Event, Parser, TagEnd};
-use wxdragon::{ffi, prelude::*, translations::translate as t, window::WxWidget};
+use wxdragon::{ffi, prelude::*, window::WxWidget};
 
 use crate::{UpdateChannel, UpdateCheckOutcome, UpdateError, UpdaterConfig, check_for_updates, download_update_file};
 
