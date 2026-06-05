@@ -12,14 +12,10 @@ categories = ["gui"]
 [package.metadata.patois]
 translatable = true
 
-[features]
-default = []
-ui = ["dep:pulldown-cmark", "dep:wxdragon"]
-
 [dependencies]
 minisign-verify = "0.2.5"
 patois = "0.1.0"
-pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
-wxdragon = { version = "0.9.16", optional = true }
+wxdragon = "0.9.16"

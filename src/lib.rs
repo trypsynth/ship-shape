@@ -49,7 +49,6 @@ impl UpdaterConfig {
 	}
 }
 
-#[cfg(feature = "ui")]
 pub mod ui;
 
 /// Which release stream to check against.
