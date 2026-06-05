@@ -185,6 +185,9 @@ fn present_update_result(
 							};
 							if !keep_going {
 								hb_cancelled_c.store(true, Ordering::Relaxed);
+								if let Some(dialog) = p.borrow().as_ref() {
+									dialog.update(100, None);
+								}
 								*p.borrow_mut() = None;
 							}
 						});
