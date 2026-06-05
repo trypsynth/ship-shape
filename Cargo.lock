@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "ship-shape"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "minisign-verify",
  "pulldown-cmark",
