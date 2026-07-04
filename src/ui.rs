@@ -23,6 +23,13 @@ thread_local! {
 	static ACTIVE_PROGRESS: RefCell<Option<ProgressDialog>> = const { RefCell::new(None) };
 }
 
+/// Guards against a second update-check flow (silent startup check, manual "Check for
+/// Updates", or an impatient double-click while a download is stuck) from starting while
+/// one is already running. Without this, two concurrent downloads race on the same temp
+/// file and a completing stale check can silently destroy the progress dialog belonging to
+/// a newer one.
+static UPDATE_CHECK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 struct ParentWindow {
 	handle: *mut ffi::wxd_Window_t,
 }
@@ -99,6 +106,10 @@ pub fn show_update_dialog(parent: &dyn WxWidget, new_version: &str, changelog: &
 /// update-available dialog -> progress dialog -> download + verify -> launch installer/extractor.
 ///
 /// `window_handle` must be `frame.handle_ptr() as usize` and must remain valid for the lifetime of the update flow. `silent` suppresses the "you're up to date" and error dialogs while still showing the update dialog when one is found.
+///
+/// If an update check or download is already in progress, this is a no-op: it is safe to call
+/// from both a silent startup check and a user-triggered menu action without risking two
+/// concurrent downloads fighting over the same temp file and progress dialog.
 pub fn run_update_check(
 	config: Arc<UpdaterConfig>,
 	window_handle: usize,
@@ -108,6 +119,9 @@ pub fn run_update_check(
 	channel: UpdateChannel,
 	silent: bool,
 ) {
+	if UPDATE_CHECK_ACTIVE.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+		return;
+	}
 	let version = current_version.to_string();
 	let commit = current_commit.to_string();
 	thread::spawn(move || {
@@ -137,6 +151,7 @@ fn present_update_result(
 			if !show_update_dialog(&parent, &latest_version, &release_notes, &config.app_display_name)
 				|| result.download_url.is_empty()
 			{
+				UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 				return;
 			}
 			let download_url = result.download_url;
@@ -185,6 +200,9 @@ fn present_update_result(
 								}
 							};
 							if !keep_going {
+								// Signal the download thread to abort immediately instead of
+								// letting the transfer run to completion (or its 10-minute
+								// timeout) unattended in the background.
 								hb_cancelled_c.store(true, Ordering::Relaxed);
 								if let Some(dialog) = p.borrow().as_ref() {
 									dialog.update(100, None);
@@ -202,7 +220,7 @@ fn present_update_result(
 			let d_is_running = is_running;
 			let d_cancelled = cancelled;
 			thread::spawn(move || {
-				let res = download_update_file(&config, &download_url, &signature_url, |d, t| {
+				let res = download_update_file(&config, &download_url, &signature_url, &d_cancelled, |d, t| {
 					d_downloaded.store(d, Ordering::Relaxed);
 					d_total.store(t, Ordering::Relaxed);
 				});
@@ -214,6 +232,7 @@ fn present_update_result(
 					if !d_cancelled.load(Ordering::Relaxed) {
 						execute_update(window_handle, res);
 					}
+					UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 				}));
 			});
 		}
@@ -232,6 +251,7 @@ fn present_update_result(
 					.build();
 				dialog.show_modal();
 			}
+			UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 		}
 		Err(e) => {
 			if !silent {
@@ -249,6 +269,7 @@ fn present_update_result(
 					.build();
 				dialog.show_modal();
 			}
+			UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 		}
 	}
 }
