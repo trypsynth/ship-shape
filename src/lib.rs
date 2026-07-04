@@ -8,6 +8,7 @@ use std::{
 	io::{Read, Write},
 	path::{Path, PathBuf},
 	str,
+	sync::atomic::{AtomicBool, Ordering},
 	time::Duration,
 };
 
@@ -96,6 +97,9 @@ pub enum UpdateError {
 	InvalidResponse(String),
 	NoDownload(String),
 	VerificationError(String),
+	/// The in-progress download was cancelled by the caller via the `cancelled` flag
+	/// passed to [`download_update_file`].
+	Cancelled,
 }
 
 impl Display for UpdateError {
@@ -107,6 +111,7 @@ impl Display for UpdateError {
 			Self::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
 			Self::NoDownload(msg) => write!(f, "No download: {msg}"),
 			Self::VerificationError(msg) => write!(f, "Verification error: {msg}"),
+			Self::Cancelled => write!(f, "Download cancelled"),
 		}
 	}
 }
@@ -118,17 +123,24 @@ impl Error for UpdateError {}
 /// The signature is fetched from `signature_url`. `progress_callback(downloaded, total)` is called
 /// after each chunk; `total` may be 0 if the server does not send `Content-Length`.
 ///
+/// `cancelled` is polled between network operations and after every chunk read; as soon as it is
+/// set to `true` the download stops, any partially written file is removed, and
+/// [`UpdateError::Cancelled`] is returned. This keeps cancellation responsive instead of letting a
+/// slow or stalled transfer run to completion (or time out) in the background after the user has
+/// already dismissed the progress dialog.
+///
 /// `.exe` files land in the system temp directory; `.zip` files land next to the current
 /// executable so that the extraction script can overwrite in-place.
 ///
 /// # Errors
 ///
-/// Returns [`UpdateError`] on network failure, HTTP error, I/O error, or signature verification
-/// failure.
+/// Returns [`UpdateError`] on network failure, HTTP error, I/O error, cancellation, or signature
+/// verification failure.
 pub fn download_update_file(
 	config: &UpdaterConfig,
 	url: &str,
 	signature_url: &str,
+	cancelled: &AtomicBool,
 	mut progress_callback: impl FnMut(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
 	let http = build_agent(Some(Duration::from_mins(10)));
@@ -140,6 +152,9 @@ pub fn download_update_file(
 		.as_reader()
 		.read_to_end(&mut sig_bytes)
 		.map_err(|e| UpdateError::NetworkError(format!("Failed to read signature: {e}")))?;
+	if cancelled.load(Ordering::Relaxed) {
+		return Err(UpdateError::Cancelled);
+	}
 	let resp = http.get(url).header("User-Agent", &config.user_agent).call().map_err(|e| map_http_err(&e))?;
 	let total_size = resp
 		.headers()
@@ -172,30 +187,54 @@ pub fn download_update_file(
 	let mut body = resp.into_body();
 	let mut reader = body.as_reader();
 	loop {
-		let n = reader.read(&mut buffer).map_err(|e| UpdateError::NetworkError(e.to_string()))?;
+		if cancelled.load(Ordering::Relaxed) {
+			drop(file);
+			let _ = fs::remove_file(&tmp_path);
+			return Err(UpdateError::Cancelled);
+		}
+		let n = match reader.read(&mut buffer) {
+			Ok(n) => n,
+			Err(e) => {
+				drop(file);
+				let _ = fs::remove_file(&tmp_path);
+				return Err(UpdateError::NetworkError(e.to_string()));
+			}
+		};
 		if n == 0 {
 			break;
 		}
-		Write::write_all(&mut file, &buffer[..n])
-			.map_err(|e| UpdateError::NoDownload(format!("Failed to write file: {e}")))?;
+		if let Err(e) = Write::write_all(&mut file, &buffer[..n]) {
+			drop(file);
+			let _ = fs::remove_file(&tmp_path);
+			return Err(UpdateError::NoDownload(format!("Failed to write file: {e}")));
+		}
 		downloaded += n as u64;
 		progress_callback(downloaded, total_size);
 	}
 	drop(file);
-	let data = fs::read(&tmp_path)
-		.map_err(|e| UpdateError::NoDownload(format!("Failed to read file for verification: {e}")))?;
+	let data = match fs::read(&tmp_path) {
+		Ok(data) => data,
+		Err(e) => {
+			let _ = fs::remove_file(&tmp_path);
+			return Err(UpdateError::NoDownload(format!("Failed to read file for verification: {e}")));
+		}
+	};
 	let pk = PublicKey::from_base64(&config.minisign_public_key)
 		.map_err(|e| UpdateError::VerificationError(format!("Invalid public key: {e}")))?;
 	let sig_str = str::from_utf8(&sig_bytes)
 		.map_err(|e| UpdateError::VerificationError(format!("Signature is not valid UTF-8: {e}")))?;
 	let sig =
 		Signature::decode(sig_str).map_err(|e| UpdateError::VerificationError(format!("Invalid signature: {e}")))?;
-	pk.verify(&data, &sig, true)
-		.map_err(|e| UpdateError::VerificationError(format!("Signature verification failed: {e}")))?;
+	if let Err(e) = pk.verify(&data, &sig, true) {
+		let _ = fs::remove_file(&tmp_path);
+		return Err(UpdateError::VerificationError(format!("Signature verification failed: {e}")));
+	}
 	let mut final_path = tmp_path.clone();
 	final_path.set_file_name(fname);
-	fs::rename(&tmp_path, &final_path)
-		.map_err(|e| UpdateError::NoDownload(format!("Failed to rename verified file: {e}")))?;
+	if let Err(e) = fs::rename(&tmp_path, &final_path) {
+		let _ = fs::remove_file(&tmp_path);
+		return Err(UpdateError::NoDownload(format!("Failed to rename verified file: {e}")));
+	}
 	Ok(final_path)
 }
 
