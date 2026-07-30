@@ -30,6 +30,11 @@ pub struct UpdaterConfig {
 	pub minisign_public_key: String,
 	/// Value sent as the `User-Agent` header for all HTTP requests.
 	pub user_agent: String,
+	/// Inserted immediately before the extension in the expected asset file names, e.g.
+	/// `"-arm64"` to look for `{app_name}-arm64.zip` / `{app_name}_setup-arm64.exe` instead of
+	/// the unsuffixed names. Empty by default. Use this when a single release publishes
+	/// multiple architecture-specific builds under distinct asset names.
+	pub asset_suffix: String,
 }
 
 impl UpdaterConfig {
@@ -46,7 +51,16 @@ impl UpdaterConfig {
 			app_display_name: app_display_name.into(),
 			minisign_public_key: minisign_public_key.into(),
 			user_agent: user_agent.into(),
+			asset_suffix: String::new(),
 		}
+	}
+
+	/// Sets the suffix inserted before the extension in the expected asset file names. See
+	/// [`UpdaterConfig::asset_suffix`].
+	#[must_use]
+	pub fn with_asset_suffix(mut self, suffix: impl Into<String>) -> Self {
+		self.asset_suffix = suffix.into();
+		self
 	}
 }
 
@@ -370,17 +384,27 @@ fn require_asset_pair(
 	release: &GithubRelease,
 ) -> Result<(String, String), UpdateError> {
 	match release.assets.as_ref() {
-		Some(list) if !list.is_empty() => pick_asset_pair(&config.app_name, is_installer, list).ok_or_else(|| {
-			UpdateError::NoDownload(
-				"Update is available but no matching download asset or signature was found.".to_string(),
-			)
-		}),
+		Some(list) if !list.is_empty() => pick_asset_pair(&config.app_name, &config.asset_suffix, is_installer, list)
+			.ok_or_else(|| {
+				UpdateError::NoDownload(
+					"Update is available but no matching download asset or signature was found.".to_string(),
+				)
+			}),
 		_ => Err(UpdateError::NoDownload("Latest release does not include downloadable assets.".to_string())),
 	}
 }
 
-fn pick_asset_pair(app_name: &str, is_installer: bool, assets: &[ReleaseAsset]) -> Option<(String, String)> {
-	let base = if is_installer { format!("{app_name}_setup.exe") } else { format!("{app_name}.zip") };
+fn pick_asset_pair(
+	app_name: &str,
+	asset_suffix: &str,
+	is_installer: bool,
+	assets: &[ReleaseAsset],
+) -> Option<(String, String)> {
+	let base = if is_installer {
+		format!("{app_name}_setup{asset_suffix}.exe")
+	} else {
+		format!("{app_name}{asset_suffix}.zip")
+	};
 	let sig_name = format!("{base}.minisig");
 	let mut download_url = None;
 	let mut sig_url = None;
@@ -460,7 +484,7 @@ mod tests {
 			("myapp_setup.exe", "https://example.com/myapp_setup.exe"),
 			("myapp_setup.exe.minisig", "https://example.com/myapp_setup.exe.minisig"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", true, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", true, &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp_setup.exe");
 		assert_eq!(sig, "https://example.com/myapp_setup.exe.minisig");
 	}
@@ -473,7 +497,7 @@ mod tests {
 			("myapp_setup.exe", "https://example.com/myapp_setup.exe"),
 			("myapp_setup.exe.minisig", "https://example.com/myapp_setup.exe.minisig"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", false, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", false, &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp.zip");
 		assert_eq!(sig, "https://example.com/myapp.zip.minisig");
 	}
@@ -484,7 +508,7 @@ mod tests {
 			("MYAPP.ZIP", "https://example.com/MYAPP.ZIP"),
 			("MYAPP.ZIP.MINISIG", "https://example.com/MYAPP.ZIP.MINISIG"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", false, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", false, &assets).unwrap();
 		assert_eq!(url, "https://example.com/MYAPP.ZIP");
 		assert_eq!(sig, "https://example.com/MYAPP.ZIP.MINISIG");
 	}
@@ -492,13 +516,31 @@ mod tests {
 	#[test]
 	fn pick_asset_pair_returns_none_when_missing() {
 		let assets = make_assets(&[("notes.txt", "https://example.com/notes.txt")]);
-		assert!(pick_asset_pair("myapp", true, &assets).is_none());
-		assert!(pick_asset_pair("myapp", false, &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", true, &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", false, &assets).is_none());
 	}
 
 	#[test]
 	fn pick_asset_pair_returns_none_when_sig_missing() {
 		let assets = make_assets(&[("myapp.zip", "https://example.com/myapp.zip")]);
-		assert!(pick_asset_pair("myapp", false, &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", false, &assets).is_none());
+	}
+
+	#[test]
+	fn pick_asset_pair_with_arch_suffix() {
+		let assets = make_assets(&[
+			("myapp.zip", "https://example.com/myapp.zip"),
+			("myapp.zip.minisig", "https://example.com/myapp.zip.minisig"),
+			("myapp-arm64.zip", "https://example.com/myapp-arm64.zip"),
+			("myapp-arm64.zip.minisig", "https://example.com/myapp-arm64.zip.minisig"),
+			("myapp_setup-arm64.exe", "https://example.com/myapp_setup-arm64.exe"),
+			("myapp_setup-arm64.exe.minisig", "https://example.com/myapp_setup-arm64.exe.minisig"),
+		]);
+		let (url, sig) = pick_asset_pair("myapp", "-arm64", false, &assets).unwrap();
+		assert_eq!(url, "https://example.com/myapp-arm64.zip");
+		assert_eq!(sig, "https://example.com/myapp-arm64.zip.minisig");
+		let (url, sig) = pick_asset_pair("myapp", "-arm64", true, &assets).unwrap();
+		assert_eq!(url, "https://example.com/myapp_setup-arm64.exe");
+		assert_eq!(sig, "https://example.com/myapp_setup-arm64.exe.minisig");
 	}
 }
