@@ -35,6 +35,14 @@ pub struct UpdaterConfig {
 	/// the unsuffixed names. Empty by default. Use this when a single release publishes
 	/// multiple architecture-specific builds under distinct asset names.
 	pub asset_suffix: String,
+	/// Overrides [`UpdaterConfig::asset_suffix`] for the installer asset name only. `None`
+	/// (the default) applies `asset_suffix` to installer and zip names alike. Set it to `""`
+	/// when a single architecture-independent (fat) installer serves every build while zip
+	/// assets stay per-architecture.
+	pub installer_asset_suffix: Option<String>,
+	/// Command-line arguments passed to a downloaded installer on Windows. Defaults to
+	/// `["/silent"]` (Inno Setup); NSIS installers need `["/S"]`.
+	pub installer_args: Vec<String>,
 }
 
 impl UpdaterConfig {
@@ -52,6 +60,8 @@ impl UpdaterConfig {
 			minisign_public_key: minisign_public_key.into(),
 			user_agent: user_agent.into(),
 			asset_suffix: String::new(),
+			installer_asset_suffix: None,
+			installer_args: vec!["/silent".into()],
 		}
 	}
 
@@ -60,6 +70,26 @@ impl UpdaterConfig {
 	#[must_use]
 	pub fn with_asset_suffix(mut self, suffix: impl Into<String>) -> Self {
 		self.asset_suffix = suffix.into();
+		self
+	}
+
+	/// Sets the suffix used for the installer asset name only. See
+	/// [`UpdaterConfig::installer_asset_suffix`].
+	#[must_use]
+	pub fn with_installer_asset_suffix(mut self, suffix: impl Into<String>) -> Self {
+		self.installer_asset_suffix = Some(suffix.into());
+		self
+	}
+
+	/// Sets the command-line arguments passed to a downloaded installer. See
+	/// [`UpdaterConfig::installer_args`].
+	#[must_use]
+	pub fn with_installer_args<I, S>(mut self, args: I) -> Self
+	where
+		I: IntoIterator<Item = S>,
+		S: Into<String>,
+	{
+		self.installer_args = args.into_iter().map(Into::into).collect();
 		self
 	}
 }
@@ -384,13 +414,23 @@ fn require_asset_pair(
 	release: &GithubRelease,
 ) -> Result<(String, String), UpdateError> {
 	match release.assets.as_ref() {
-		Some(list) if !list.is_empty() => pick_asset_pair(&config.app_name, &config.asset_suffix, is_installer, list)
-			.ok_or_else(|| {
-				UpdateError::NoDownload(
-					"Update is available but no matching download asset or signature was found.".to_string(),
-				)
-			}),
+		Some(list) if !list.is_empty() => {
+			pick_asset_pair(&config.app_name, effective_asset_suffix(config, is_installer), is_installer, list)
+				.ok_or_else(|| {
+					UpdateError::NoDownload(
+						"Update is available but no matching download asset or signature was found.".to_string(),
+					)
+				})
+		}
 		_ => Err(UpdateError::NoDownload("Latest release does not include downloadable assets.".to_string())),
+	}
+}
+
+fn effective_asset_suffix(config: &UpdaterConfig, is_installer: bool) -> &str {
+	if is_installer {
+		config.installer_asset_suffix.as_deref().unwrap_or(&config.asset_suffix)
+	} else {
+		&config.asset_suffix
 	}
 }
 
@@ -542,5 +582,51 @@ mod tests {
 		let (url, sig) = pick_asset_pair("myapp", "-arm64", true, &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp_setup-arm64.exe");
 		assert_eq!(sig, "https://example.com/myapp_setup-arm64.exe.minisig");
+	}
+
+	#[test]
+	fn installer_args_default_to_inno_silent() {
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0");
+		assert_eq!(config.installer_args, vec!["/silent".to_string()]);
+	}
+
+	#[test]
+	fn with_installer_args_replaces_default() {
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0").with_installer_args(["/S"]);
+		assert_eq!(config.installer_args, vec!["/S".to_string()]);
+	}
+
+	#[test]
+	fn effective_asset_suffix_defaults_to_shared_suffix() {
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0").with_asset_suffix("-x64");
+		assert_eq!(effective_asset_suffix(&config, true), "-x64");
+		assert_eq!(effective_asset_suffix(&config, false), "-x64");
+	}
+
+	#[test]
+	fn installer_asset_suffix_overrides_installer_only() {
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0")
+			.with_asset_suffix("-x64")
+			.with_installer_asset_suffix("");
+		assert_eq!(effective_asset_suffix(&config, true), "");
+		assert_eq!(effective_asset_suffix(&config, false), "-x64");
+	}
+
+	#[test]
+	fn pick_asset_pair_fat_installer_with_per_arch_zips() {
+		// One architecture-independent installer serves every build while zips stay per-arch.
+		let assets = make_assets(&[
+			("myapp_setup.exe", "https://example.com/myapp_setup.exe"),
+			("myapp_setup.exe.minisig", "https://example.com/myapp_setup.exe.minisig"),
+			("myapp-x64.zip", "https://example.com/myapp-x64.zip"),
+			("myapp-x64.zip.minisig", "https://example.com/myapp-x64.zip.minisig"),
+		]);
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0")
+			.with_asset_suffix("-x64")
+			.with_installer_asset_suffix("");
+		let (url, _) = pick_asset_pair("myapp", effective_asset_suffix(&config, true), true, &assets).unwrap();
+		assert_eq!(url, "https://example.com/myapp_setup.exe");
+		let (url, _) = pick_asset_pair("myapp", effective_asset_suffix(&config, false), false, &assets).unwrap();
+		assert_eq!(url, "https://example.com/myapp-x64.zip");
 	}
 }

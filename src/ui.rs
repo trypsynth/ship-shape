@@ -230,7 +230,7 @@ fn present_update_result(
 						*p.borrow_mut() = None;
 					});
 					if !d_cancelled.load(Ordering::Relaxed) {
-						execute_update(window_handle, res);
+						execute_update(&config, window_handle, res);
 					}
 					UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 				}));
@@ -274,7 +274,37 @@ fn present_update_result(
 	}
 }
 
-fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
+#[cfg(any(target_os = "windows", test))]
+fn ps_quote(s: &str) -> String {
+	format!("'{}'", s.replace('\'', "''"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn installer_script(pid: u32, installer_args: &[String], installer: &str, current_exe: &str) -> String {
+	let arg_clause = if installer_args.is_empty() {
+		String::new()
+	} else {
+		let args = installer_args.iter().map(|a| ps_quote(a)).collect::<Vec<_>>().join(",");
+		format!(" -ArgumentList {args}")
+	};
+	format!(
+		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath {}{arg_clause} -Wait; Start-Process -FilePath {}",
+		ps_quote(installer),
+		ps_quote(current_exe)
+	)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn zip_update_script(pid: u32, zip: &str, dest_dir: &str, current_exe: &str) -> String {
+	format!(
+		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Expand-Archive -Path {zip_q} -DestinationPath {dest_q} -Force; Remove-Item -Path {zip_q} -Force; Start-Process {exe_q}",
+		zip_q = ps_quote(zip),
+		dest_q = ps_quote(dest_dir),
+		exe_q = ps_quote(current_exe)
+	)
+}
+
+fn execute_update(config: &UpdaterConfig, window_handle: usize, result: Result<PathBuf, UpdateError>) {
 	let handle = window_handle as *mut ffi::wxd_Window_t;
 	let parent = ParentWindow { handle };
 	let err_title = t("Error");
@@ -293,7 +323,7 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 	let is_zip = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
 	#[cfg(not(target_os = "windows"))]
 	{
-		let _ = (is_exe, is_zip);
+		let _ = (is_exe, is_zip, config);
 		let msg = t("Update downloaded to: %s\nPlease install it manually.").replace("%s", &path.display().to_string());
 		let ready_title = t("Update Ready");
 		let dialog = MessageDialog::builder(&parent, &msg, &ready_title)
@@ -316,12 +346,11 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 			}
 		};
 		if is_exe {
-			let pid = process::id();
-			let script = format!(
-				"Start-Sleep -Seconds 1; Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}' -ArgumentList '/silent' -Wait; Start-Process -FilePath '{}'",
-				pid,
-				path.display(),
-				current_exe.display()
+			let script = installer_script(
+				process::id(),
+				&config.installer_args,
+				&path.display().to_string(),
+				&current_exe.display().to_string(),
 			);
 			if let Err(e) = Command::new("powershell.exe")
 				.arg("-NoProfile")
@@ -342,14 +371,11 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 			process::exit(0);
 		} else if is_zip {
 			let exe_dir = current_exe.parent().unwrap_or(&current_exe);
-			let pid = process::id();
-			let script = format!(
-				"Start-Sleep -Seconds 1; Wait-Process -Id {}; Expand-Archive -Path '{}' -DestinationPath '{}' -Force; Remove-Item -Path '{}' -Force; Start-Process '{}'",
-				pid,
-				path.display(),
-				exe_dir.display(),
-				path.display(),
-				current_exe.display()
+			let script = zip_update_script(
+				process::id(),
+				&path.display().to_string(),
+				&exe_dir.display().to_string(),
+				&current_exe.display().to_string(),
 			);
 			if let Err(e) = Command::new("powershell.exe")
 				.arg("-NoProfile")
@@ -375,5 +401,63 @@ fn execute_update(window_handle: usize, result: Result<PathBuf, UpdateError>) {
 				.build();
 			dialog.show_modal();
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn ps_quote_wraps_in_single_quotes() {
+		assert_eq!(ps_quote(r"C:\Temp\app_setup.exe"), r"'C:\Temp\app_setup.exe'");
+	}
+
+	#[test]
+	fn ps_quote_doubles_embedded_single_quotes() {
+		assert_eq!(ps_quote(r"C:\Users\O'Brien\app.exe"), r"'C:\Users\O''Brien\app.exe'");
+	}
+
+	#[test]
+	fn installer_script_uses_configured_args() {
+		let script = installer_script(42, &["/S".to_string()], r"C:\Temp\app_setup.exe", r"C:\App\app.exe");
+		assert_eq!(
+			script,
+			r"Start-Sleep -Seconds 1; Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Temp\app_setup.exe' -ArgumentList '/S' -Wait; Start-Process -FilePath 'C:\App\app.exe'"
+		);
+	}
+
+	#[test]
+	fn installer_script_quotes_each_arg() {
+		let args = ["/S".to_string(), r"/D=C:\Program Files\App".to_string()];
+		let script = installer_script(1, &args, r"C:\t\s.exe", r"C:\a\a.exe");
+		assert!(script.contains(r"-ArgumentList '/S','/D=C:\Program Files\App' -Wait"));
+	}
+
+	#[test]
+	fn installer_script_omits_argument_list_when_empty() {
+		let script = installer_script(7, &[], r"C:\t\s.exe", r"C:\a\a.exe");
+		assert!(!script.contains("-ArgumentList"));
+		assert!(script.contains(r"Start-Process -FilePath 'C:\t\s.exe' -Wait"));
+	}
+
+	#[test]
+	fn installer_script_escapes_quotes_in_paths() {
+		let script = installer_script(7, &[], r"C:\Users\O'Brien\s.exe", r"C:\Users\O'Brien\a.exe");
+		assert!(script.contains(r"'C:\Users\O''Brien\s.exe'"));
+		assert!(script.contains(r"'C:\Users\O''Brien\a.exe'"));
+	}
+
+	#[test]
+	fn zip_script_escapes_quotes_in_paths() {
+		let script =
+			zip_update_script(7, r"C:\Users\O'Brien\app.zip", r"C:\Users\O'Brien", r"C:\Users\O'Brien\app.exe");
+		assert!(
+			script.contains(
+				r"Expand-Archive -Path 'C:\Users\O''Brien\app.zip' -DestinationPath 'C:\Users\O''Brien' -Force"
+			)
+		);
+		assert!(script.contains(r"Remove-Item -Path 'C:\Users\O''Brien\app.zip' -Force"));
+		assert!(script.contains(r"Start-Process 'C:\Users\O''Brien\app.exe'"));
 	}
 }
