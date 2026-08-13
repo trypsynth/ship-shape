@@ -129,6 +129,9 @@ pub fn run_update_check(
 		wxdragon::call_after(Box::new(move || {
 			present_update_result(config, window_handle, outcome, silent, &version);
 		}));
+		// call_after only enqueues; an otherwise idle event loop may not drain
+		// the queue until the next natural message.
+		wxdragon::wake_up_idle();
 	});
 }
 
@@ -211,6 +214,7 @@ fn present_update_result(
 							}
 						});
 					}));
+					wxdragon::wake_up_idle();
 					thread::sleep(Duration::from_millis(200));
 				}
 			});
@@ -234,6 +238,7 @@ fn present_update_result(
 					}
 					UPDATE_CHECK_ACTIVE.store(false, Ordering::SeqCst);
 				}));
+				wxdragon::wake_up_idle();
 			});
 		}
 		Ok(UpdateCheckOutcome::UpToDate(ver)) => {
