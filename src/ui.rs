@@ -566,6 +566,11 @@ mod tests {
 	}
 
 	#[test]
+	fn inline_code_keeps_its_text() {
+		assert_eq!(markdown_to_text("Use `--silent` now."), "Use --silent now.");
+	}
+
+	#[test]
 	fn blank_markdown_produces_an_empty_string() {
 		assert_eq!(markdown_to_text("\n\n   \n"), "");
 	}
