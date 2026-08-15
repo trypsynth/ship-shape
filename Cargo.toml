@@ -18,4 +18,4 @@ patois = "0.1.2"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
-wxdragon = "0.9.17"
+wxdragon = "0.9.18"
