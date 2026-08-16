@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "ship-shape"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "minisign-verify",
  "patois",
