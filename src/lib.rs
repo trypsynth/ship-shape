@@ -22,7 +22,9 @@ pub struct UpdaterConfig {
 	/// GitHub repository in `"owner/repo"` format.
 	pub github_repo: String,
 	/// App name used to derive asset file names.
-	/// A zip asset is expected to be `{app_name}.zip` and an installer `{app_name}_setup.exe`.
+	/// On Windows a zip asset is expected to be `{app_name}.zip` and an installer
+	/// `{app_name}_setup.exe`. On macOS the expected asset is a disk image,
+	/// `{app_name}.dmg`; `is_installer` is ignored there since there is only one asset kind.
 	pub app_name: String,
 	/// Human-readable app name used in dialog titles and messages (e.g. `"Paperback"`).
 	pub app_display_name: String,
@@ -174,7 +176,9 @@ impl Error for UpdateError {}
 /// already dismissed the progress dialog.
 ///
 /// `.exe` files land in the system temp directory; `.zip` files land next to the current
-/// executable so that the extraction script can overwrite in-place.
+/// executable so that the extraction script can overwrite in-place. `.dmg` files (macOS) land
+/// in the system temp directory since they're mounted and installed in place rather than
+/// extracted over the running app.
 ///
 /// # Errors
 ///
@@ -415,7 +419,8 @@ fn require_asset_pair(
 ) -> Result<(String, String), UpdateError> {
 	match release.assets.as_ref() {
 		Some(list) if !list.is_empty() => {
-			pick_asset_pair(&config.app_name, effective_asset_suffix(config, is_installer), is_installer, list)
+			let (prefix, ext) = asset_name_parts(is_installer);
+			pick_asset_pair(&config.app_name, effective_asset_suffix(config, is_installer), prefix, ext, list)
 				.ok_or_else(|| {
 					UpdateError::NoDownload(
 						"Update is available but no matching download asset or signature was found.".to_string(),
@@ -424,6 +429,19 @@ fn require_asset_pair(
 		}
 		_ => Err(UpdateError::NoDownload("Latest release does not include downloadable assets.".to_string())),
 	}
+}
+
+/// Returns the `(prefix, extension)` used to build the expected asset file name for the
+/// current platform. On Windows this depends on `is_installer` (`_setup`/`exe` vs. `""`/`zip`);
+/// on macOS there is a single asset kind, a disk image, so `is_installer` is ignored.
+#[cfg(target_os = "macos")]
+const fn asset_name_parts(_is_installer: bool) -> (&'static str, &'static str) {
+	("", "dmg")
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn asset_name_parts(is_installer: bool) -> (&'static str, &'static str) {
+	if is_installer { ("_setup", "exe") } else { ("", "zip") }
 }
 
 fn effective_asset_suffix(config: &UpdaterConfig, is_installer: bool) -> &str {
@@ -437,14 +455,11 @@ fn effective_asset_suffix(config: &UpdaterConfig, is_installer: bool) -> &str {
 fn pick_asset_pair(
 	app_name: &str,
 	asset_suffix: &str,
-	is_installer: bool,
+	prefix: &str,
+	ext: &str,
 	assets: &[ReleaseAsset],
 ) -> Option<(String, String)> {
-	let base = if is_installer {
-		format!("{app_name}_setup{asset_suffix}.exe")
-	} else {
-		format!("{app_name}{asset_suffix}.zip")
-	};
+	let base = format!("{app_name}{prefix}{asset_suffix}.{ext}");
 	let sig_name = format!("{base}.minisig");
 	let mut download_url = None;
 	let mut sig_url = None;
@@ -524,7 +539,7 @@ mod tests {
 			("myapp_setup.exe", "https://example.com/myapp_setup.exe"),
 			("myapp_setup.exe.minisig", "https://example.com/myapp_setup.exe.minisig"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", "", true, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", "_setup", "exe", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp_setup.exe");
 		assert_eq!(sig, "https://example.com/myapp_setup.exe.minisig");
 	}
@@ -537,7 +552,7 @@ mod tests {
 			("myapp_setup.exe", "https://example.com/myapp_setup.exe"),
 			("myapp_setup.exe.minisig", "https://example.com/myapp_setup.exe.minisig"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", "", false, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", "", "zip", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp.zip");
 		assert_eq!(sig, "https://example.com/myapp.zip.minisig");
 	}
@@ -548,7 +563,7 @@ mod tests {
 			("MYAPP.ZIP", "https://example.com/MYAPP.ZIP"),
 			("MYAPP.ZIP.MINISIG", "https://example.com/MYAPP.ZIP.MINISIG"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", "", false, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "", "", "zip", &assets).unwrap();
 		assert_eq!(url, "https://example.com/MYAPP.ZIP");
 		assert_eq!(sig, "https://example.com/MYAPP.ZIP.MINISIG");
 	}
@@ -556,14 +571,14 @@ mod tests {
 	#[test]
 	fn pick_asset_pair_returns_none_when_missing() {
 		let assets = make_assets(&[("notes.txt", "https://example.com/notes.txt")]);
-		assert!(pick_asset_pair("myapp", "", true, &assets).is_none());
-		assert!(pick_asset_pair("myapp", "", false, &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", "_setup", "exe", &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", "", "zip", &assets).is_none());
 	}
 
 	#[test]
 	fn pick_asset_pair_returns_none_when_sig_missing() {
 		let assets = make_assets(&[("myapp.zip", "https://example.com/myapp.zip")]);
-		assert!(pick_asset_pair("myapp", "", false, &assets).is_none());
+		assert!(pick_asset_pair("myapp", "", "", "zip", &assets).is_none());
 	}
 
 	#[test]
@@ -576,12 +591,37 @@ mod tests {
 			("myapp_setup-arm64.exe", "https://example.com/myapp_setup-arm64.exe"),
 			("myapp_setup-arm64.exe.minisig", "https://example.com/myapp_setup-arm64.exe.minisig"),
 		]);
-		let (url, sig) = pick_asset_pair("myapp", "-arm64", false, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "-arm64", "", "zip", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp-arm64.zip");
 		assert_eq!(sig, "https://example.com/myapp-arm64.zip.minisig");
-		let (url, sig) = pick_asset_pair("myapp", "-arm64", true, &assets).unwrap();
+		let (url, sig) = pick_asset_pair("myapp", "-arm64", "_setup", "exe", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp_setup-arm64.exe");
 		assert_eq!(sig, "https://example.com/myapp_setup-arm64.exe.minisig");
+	}
+
+	#[test]
+	fn pick_asset_pair_dmg() {
+		let assets = make_assets(&[
+			("myapp.dmg", "https://example.com/myapp.dmg"),
+			("myapp.dmg.minisig", "https://example.com/myapp.dmg.minisig"),
+		]);
+		let (url, sig) = pick_asset_pair("myapp", "", "", "dmg", &assets).unwrap();
+		assert_eq!(url, "https://example.com/myapp.dmg");
+		assert_eq!(sig, "https://example.com/myapp.dmg.minisig");
+	}
+
+	#[test]
+	fn asset_name_parts_matches_current_platform() {
+		#[cfg(target_os = "macos")]
+		{
+			assert_eq!(asset_name_parts(true), ("", "dmg"));
+			assert_eq!(asset_name_parts(false), ("", "dmg"));
+		}
+		#[cfg(not(target_os = "macos"))]
+		{
+			assert_eq!(asset_name_parts(true), ("_setup", "exe"));
+			assert_eq!(asset_name_parts(false), ("", "zip"));
+		}
 	}
 
 	#[test]
@@ -624,9 +664,10 @@ mod tests {
 		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "ua/1.0")
 			.with_asset_suffix("-x64")
 			.with_installer_asset_suffix("");
-		let (url, _) = pick_asset_pair("myapp", effective_asset_suffix(&config, true), true, &assets).unwrap();
+		let (url, _) =
+			pick_asset_pair("myapp", effective_asset_suffix(&config, true), "_setup", "exe", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp_setup.exe");
-		let (url, _) = pick_asset_pair("myapp", effective_asset_suffix(&config, false), false, &assets).unwrap();
+		let (url, _) = pick_asset_pair("myapp", effective_asset_suffix(&config, false), "", "zip", &assets).unwrap();
 		assert_eq!(url, "https://example.com/myapp-x64.zip");
 	}
 }

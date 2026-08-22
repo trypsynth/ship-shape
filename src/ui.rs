@@ -1,10 +1,13 @@
 #[cfg(target_os = "windows")]
+use std::env;
+#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::process;
 use std::{
 	cell::RefCell,
-	env,
 	path::PathBuf,
-	process::{self, Command},
+	process::Command,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -380,9 +383,10 @@ fn execute_update(config: &UpdaterConfig, window_handle: usize, result: Result<P
 	};
 	let is_exe = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
 	let is_zip = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
-	#[cfg(not(target_os = "windows"))]
+	let is_dmg = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("dmg"));
+	#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 	{
-		let _ = (is_exe, is_zip, config);
+		let _ = (is_exe, is_zip, is_dmg, config);
 		let msg = t("Update downloaded to: %s\nPlease install it manually.").replace("%s", &path.display().to_string());
 		let ready_title = t("Update Ready");
 		let dialog = MessageDialog::builder(&parent, &msg, &ready_title)
@@ -391,8 +395,40 @@ fn execute_update(config: &UpdaterConfig, window_handle: usize, result: Result<P
 		dialog.show_modal();
 		return;
 	}
+	#[cfg(target_os = "macos")]
+	{
+		let _ = (is_exe, is_zip);
+		if !is_dmg {
+			let msg = t("Unknown update file format.");
+			let dialog = MessageDialog::builder(&parent, &msg, &err_title)
+				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+				.build();
+			dialog.show_modal();
+			return;
+		}
+		// `open` mounts the disk image and shows it in a Finder window, the same as
+		// double-clicking it. The user still drags the app into Applications themselves.
+		if let Err(e) = Command::new("open").arg(&path).spawn() {
+			let msg = format!("{}: {e}", t("Failed to open disk image"));
+			let dialog = MessageDialog::builder(&parent, &msg, &err_title)
+				.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+				.build();
+			dialog.show_modal();
+			return;
+		}
+		let msg = t(
+			"The update has been downloaded and its disk image opened. Quit %s and drag the new version into Applications to finish installing.",
+		)
+		.replace("%s", &config.app_display_name);
+		let ready_title = t("Update Ready");
+		let dialog = MessageDialog::builder(&parent, &msg, &ready_title)
+			.with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
+			.build();
+		dialog.show_modal();
+	}
 	#[cfg(target_os = "windows")]
 	{
+		let _ = is_dmg;
 		let current_exe = match env::current_exe() {
 			Ok(p) => p,
 			Err(e) => {
