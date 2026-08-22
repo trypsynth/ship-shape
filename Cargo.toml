@@ -14,8 +14,8 @@ translatable = true
 
 [dependencies]
 minisign-verify = "0.2.5"
-patois = "0.2.0"
+patois = "0.2.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
-wxdragon = "0.9.18"
+wxdragon = "0.9.19"
