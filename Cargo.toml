@@ -1,6 +1,6 @@
 [package]
 name = "ship-shape"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2024"
 description = "Universal auto-updater for wxDragon desktop apps"
 license = "MIT"
