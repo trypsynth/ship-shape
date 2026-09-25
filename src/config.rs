@@ -16,7 +16,8 @@ pub struct UpdaterConfig {
 	pub github_repo: String,
 	/// App name used to derive asset file names.
 	/// On Windows a zip asset is expected to be `{app_name}.zip` and an installer
-	/// `{app_name}_setup.exe`. On macOS the expected asset is a disk image,
+	/// `{app_name}_setup.exe`. On Linux the equivalents are `{app_name}.tar.gz` and
+	/// `{app_name}.AppImage`. On macOS the expected asset is a disk image,
 	/// `{app_name}.dmg`; `install_kind` is ignored there since there is only one asset kind.
 	pub app_name: String,
 	/// Human-readable app name used in dialog titles and messages (e.g. `"Paperback"`).

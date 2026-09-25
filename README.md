@@ -1,6 +1,6 @@
 # ship-shape
 
-Auto-updater library for wxDragon desktop apps, supporting Windows and macOS.
+Auto-updater library for wxDragon desktop apps, supporting Windows, macOS, and Linux.
 
 ## Features
 
@@ -11,11 +11,16 @@ Auto-updater library for wxDragon desktop apps, supporting Windows and macOS.
   - Windows: PowerShell install/extract scripts that relaunch the app afterward
   - macOS: downloads and mounts a signed, notarized `.dmg` for the user to drag into
     Applications; the app must be quit and relaunched manually
+  - Linux: a shell script that extracts the tarball or replaces the running `.AppImage`, then
+    relaunches the app, the same self-updating flow as Windows
   - Other platforms: downloads the file and tells the user where it is
 
 On macOS the expected release asset is `{app_name}.dmg` (`install_kind` is ignored there,
-since there's only one asset kind). Windows keeps the `{app_name}.zip` (`InstallKind::Portable`) /
-`{app_name}_setup.exe` (`InstallKind::Installer`) distinction.
+since there's only one asset kind). Windows and Linux keep the same `InstallKind` distinction:
+`{app_name}.zip` / `{app_name}.tar.gz` for `InstallKind::Portable`, and `{app_name}_setup.exe` /
+`{app_name}.AppImage` for `InstallKind::Installer`. The Linux installer flow requires the running
+process to be inside an AppImage (it reads the `APPIMAGE` environment variable the AppImage
+runtime sets); there's no separate install step to run, so the update just replaces that file.
 
 Each platform's asset names, download folder, and install flow live in one file under
 `src/platform/`. To add a platform, add a file there and select it in `src/platform.rs`.

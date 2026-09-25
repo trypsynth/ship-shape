@@ -34,8 +34,9 @@ impl Drop for TempDownload {
 /// already dismissed the progress dialog.
 ///
 /// The destination folder depends on the platform and [`UpdaterConfig::install_kind`]. A portable
-/// Windows zip lands next to the current executable so that the extraction script can overwrite
-/// in place. Everything else lands in the system temp directory.
+/// Windows zip or Linux tar.gz lands next to the current executable so that the extraction script
+/// can overwrite in place. A Linux `AppImage` lands in a per-user cache directory. Everything else
+/// lands in the system temp directory.
 ///
 /// # Errors
 ///
