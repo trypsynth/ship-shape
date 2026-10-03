@@ -67,10 +67,10 @@ pub fn install_with_cancel(
 	let Some(parent) = bundle.parent() else {
 		return manual_install(config, path);
 	};
-	let Some(team) = signing_team(&bundle) else {
+	// A bundle that no longer verifies, e.g. one modified after install, can still be replaced by hand.
+	let Some(team) = signing_team(&bundle).filter(|team| validate_bundle(&bundle, team).is_ok()) else {
 		return manual_install(config, path);
 	};
-	validate_bundle(&bundle, &team)?;
 	let Ok(stage) = tempfile::Builder::new().prefix(".ship-shape-").tempdir_in(parent) else {
 		return manual_install(config, path);
 	};

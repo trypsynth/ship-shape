@@ -69,8 +69,9 @@ Updates replace the running app at its existing location, including custom folde
 bundles. The DMG must contain exactly one top-level `.app` matching the running bundle identifier,
 with a valid code signature and executable. Both the running app and its replacement must carry
 the same Apple developer Team ID, verified against an Apple-issued signing chain. Unsigned and
-ad-hoc signed development builds use the manual flow. Mounted images and Gatekeeper-translocated
-apps are not modified. No administrator privileges are requested.
+ad-hoc signed development builds use the manual flow, as does an installed app whose signature no
+longer verifies. Mounted images and Gatekeeper-translocated apps are not modified. No
+administrator privileges are requested.
 
 Mounting, validation, copying, and the helper handshake run off the UI thread. Canceling before
 shutdown drops the staged update. The detached helper waits up to 60 seconds for the app to exit,
