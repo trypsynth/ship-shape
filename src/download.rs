@@ -70,7 +70,15 @@ pub fn download_update_file(
 		.and_then(|v| v.parse::<u64>().ok())
 		.unwrap_or(0);
 	let file_name = url.rsplit('/').next().unwrap_or("update.bin");
-	let final_path = platform::download_dir(config)?.join(file_name);
+	let download_dir = platform::download_dir(config)?;
+	#[cfg(target_os = "macos")]
+	let private_dir = tempfile::Builder::new()
+		.prefix("ship-shape-download-")
+		.tempdir_in(&download_dir)
+		.map_err(|e| UpdateError::Io(format!("Failed to create private download directory: {e}")))?;
+	#[cfg(target_os = "macos")]
+	let download_dir = private_dir.path();
+	let final_path = download_dir.join(file_name);
 	let temp = TempDownload(final_path.with_file_name(format!("{file_name}.tmp")));
 	let mut file = File::create(&temp.0).map_err(|e| UpdateError::Io(format!("Failed to create file: {e}")))?;
 	let mut downloaded: u64 = 0;
@@ -93,6 +101,8 @@ pub fn download_update_file(
 		.verify(&data, &signature, true)
 		.map_err(|e| UpdateError::Verification(format!("Signature verification failed: {e}")))?;
 	fs::rename(&temp.0, &final_path).map_err(|e| UpdateError::Io(format!("Failed to rename verified file: {e}")))?;
+	#[cfg(target_os = "macos")]
+	let _ = private_dir.keep();
 	Ok(final_path)
 }
 

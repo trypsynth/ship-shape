@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 /// How the running copy of the app was installed. Selects which release asset to download and how
 /// to apply it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -56,6 +58,10 @@ pub struct UpdaterConfig {
 	/// Command-line arguments passed to a downloaded installer on Windows. Defaults to
 	/// `["/silent"]` (Inno Setup); NSIS installers need `["/S"]`.
 	pub installer_args: Vec<String>,
+	/// Environment overrides passed to macOS `open` when relaunching the app. Empty by default.
+	/// Use this for an explicit configuration directory that must survive a Launch Services launch.
+	/// Ignored on other platforms. Values are passed as arguments, never as shell source.
+	pub macos_relaunch_env: Vec<(String, OsString)>,
 }
 
 impl UpdaterConfig {
@@ -81,6 +87,7 @@ impl UpdaterConfig {
 			asset_suffix: String::new(),
 			installer_asset_suffix: None,
 			installer_args: vec!["/silent".into()],
+			macos_relaunch_env: Vec::new(),
 		}
 	}
 
@@ -130,6 +137,13 @@ impl UpdaterConfig {
 		S: Into<String>,
 	{
 		self.installer_args = args.into_iter().map(Into::into).collect();
+		self
+	}
+
+	/// Preserve an environment override when macOS relaunches the updated app.
+	#[must_use]
+	pub fn with_macos_relaunch_env(mut self, name: impl Into<String>, value: impl Into<OsString>) -> Self {
+		self.macos_relaunch_env.push((name.into(), value.into()));
 		self
 	}
 

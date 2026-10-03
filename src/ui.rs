@@ -1,6 +1,4 @@
 use std::{
-	cell::RefCell,
-	path::PathBuf,
 	process, ptr,
 	sync::{
 		Arc,
@@ -21,11 +19,14 @@ use crate::{
 };
 
 mod markdown;
+mod progress;
+
+use progress::{ProgressLifecycle, download_percent};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 thread_local! {
-	static ACTIVE_PROGRESS: RefCell<Option<ProgressDialog>> = const { RefCell::new(None) };
+	static ACTIVE_PROGRESS: ProgressLifecycle<ProgressDialog> = const { ProgressLifecycle::new() };
 }
 
 /// Guards against a second update-check flow (silent startup check, manual "Check for
@@ -82,6 +83,8 @@ struct DownloadProgress {
 	downloaded: AtomicU64,
 	total: AtomicU64,
 	finished: AtomicBool,
+	#[cfg(target_os = "macos")]
+	preparing: AtomicBool,
 	cancelled: AtomicBool,
 }
 
@@ -143,6 +146,21 @@ pub fn run_update_check(
 	channel: UpdateChannel,
 	trigger: CheckTrigger,
 ) {
+	run_update_check_with_exit_handler(config, parent, channel, trigger, || process::exit(0));
+}
+
+/// Like [`run_update_check`], but calls `on_exit` on the UI thread when an installer is ready.
+///
+/// The handler must save application state and terminate the process. macOS installation is
+/// cancelled if the host does not exit within 60 seconds. It is not called on failure or cancel.
+pub fn run_update_check_with_exit_handler(
+	config: Arc<UpdaterConfig>,
+	parent: &dyn WxWidget,
+	channel: UpdateChannel,
+	trigger: CheckTrigger,
+	on_exit: impl FnOnce() + Send + 'static,
+) {
+	let on_exit: Box<dyn FnOnce() + Send> = Box::new(on_exit);
 	let Some(check) = ActiveCheck::acquire() else {
 		return;
 	};
@@ -150,7 +168,7 @@ pub fn run_update_check(
 	thread::spawn(move || {
 		let outcome = check_for_updates(&config, channel);
 		wxdragon::call_after(Box::new(move || match outcome {
-			Ok(UpdateCheckOutcome::UpdateAvailable(result)) => offer_update(config, check, parent, result),
+			Ok(UpdateCheckOutcome::UpdateAvailable(result)) => offer_update(config, check, parent, result, on_exit),
 			Ok(UpdateCheckOutcome::UpToDate(version)) if trigger == CheckTrigger::Manual => {
 				show_up_to_date(parent, &version);
 			}
@@ -163,15 +181,27 @@ pub fn run_update_check(
 	});
 }
 
-fn offer_update(config: Arc<UpdaterConfig>, check: ActiveCheck, parent: ParentWindow, result: UpdateAvailableResult) {
+fn offer_update(
+	config: Arc<UpdaterConfig>,
+	check: ActiveCheck,
+	parent: ParentWindow,
+	result: UpdateAvailableResult,
+	on_exit: Box<dyn FnOnce() + Send>,
+) {
 	let plain_notes = markdown_to_text(&result.release_notes);
 	let release_notes = if plain_notes.is_empty() { t("No release notes provided.") } else { plain_notes };
 	if show_update_dialog(&parent, &result.latest_version, &release_notes, &config.app_display_name) {
-		start_download(config, check, parent, result);
+		start_download(config, check, parent, result, on_exit);
 	}
 }
 
-fn start_download(config: Arc<UpdaterConfig>, check: ActiveCheck, parent: ParentWindow, result: UpdateAvailableResult) {
+fn start_download(
+	config: Arc<UpdaterConfig>,
+	check: ActiveCheck,
+	parent: ParentWindow,
+	result: UpdateAvailableResult,
+	on_exit: Box<dyn FnOnce() + Send>,
+) {
 	let title = t("%s Update").replace("%s", &config.app_display_name);
 	let progress_dialog = ProgressDialog::builder(&parent, &title, &t("Downloading update..."), 100)
 		.with_style(
@@ -181,7 +211,7 @@ fn start_download(config: Arc<UpdaterConfig>, check: ActiveCheck, parent: Parent
 				| ProgressDialogStyle::CanAbort,
 		)
 		.build();
-	ACTIVE_PROGRESS.with(|p| *p.borrow_mut() = Some(progress_dialog));
+	ACTIVE_PROGRESS.with(|p| p.set(progress_dialog));
 	let progress = Arc::new(DownloadProgress::default());
 	spawn_progress_heartbeat(Arc::clone(&progress));
 	thread::spawn(move || {
@@ -190,13 +220,39 @@ fn start_download(config: Arc<UpdaterConfig>, check: ActiveCheck, parent: Parent
 				progress.downloaded.store(d, Ordering::Relaxed);
 				progress.total.store(t, Ordering::Relaxed);
 			});
+		#[cfg(target_os = "macos")]
+		let download = if progress.cancelled.load(Ordering::Relaxed) {
+			if let Ok(ref path) = download {
+				platform::remove_private_download(path);
+			}
+			Err(t("Update cancelled."))
+		} else {
+			download.map_err(|e| format!("{}: {e}", t("Update failed"))).and_then(|path| {
+				progress.preparing.store(true, Ordering::Relaxed);
+				let result = platform::install_with_cancel(&config, &path, &progress.cancelled);
+				// A manual fallback still needs its DMG. Automatic preparation has copied the
+				// bundle, so its private verified download can be removed.
+				if !matches!(result, Ok(InstallOutcome::ManualStep(_))) {
+					platform::remove_private_download(&path);
+				}
+				result
+			})
+		};
 		progress.finished.store(true, Ordering::Relaxed);
 		wxdragon::call_after(Box::new(move || {
-			ACTIVE_PROGRESS.with(|p| *p.borrow_mut() = None);
-			if !progress.cancelled.load(Ordering::Relaxed) {
-				install_update(&config, parent, download);
-			}
-			drop(check);
+			ACTIVE_PROGRESS.with(|p| {
+				p.finish(Box::new(move || {
+					ACTIVE_PROGRESS.with(ProgressLifecycle::clear);
+					if !progress.cancelled.load(Ordering::Relaxed) {
+						#[cfg(not(target_os = "macos"))]
+						let download = download
+							.map_err(|e| format!("{}: {e}", t("Update failed")))
+							.and_then(|path| platform::install(&config, &path));
+						install_update(parent, download, on_exit);
+					}
+					drop(check);
+				}));
+			});
 		}));
 		wxdragon::wake_up_idle();
 	});
@@ -219,32 +275,37 @@ fn spawn_progress_heartbeat(progress: Arc<DownloadProgress>) {
 
 fn update_progress_dialog(progress: &DownloadProgress, downloaded: u64, total: u64) {
 	ACTIVE_PROGRESS.with(|p| {
-		let Some(keep_going) = p.borrow().as_ref().map(|dialog| {
-			downloaded
-				.saturating_mul(100)
-				.checked_div(total)
-				.and_then(|percent| i32::try_from(percent).ok())
-				.map_or_else(|| dialog.pulse(None), |percent| dialog.update(percent, None))
-		}) else {
+		let Some(update) = p.begin_update() else {
 			return;
 		};
+		let dialog = update.dialog();
+		#[cfg(target_os = "macos")]
+		let preparing = progress.preparing.load(Ordering::Relaxed);
+		#[cfg(not(target_os = "macos"))]
+		let preparing = false;
+		let keep_going = if preparing {
+			dialog.pulse(Some(&t("Preparing update...")))
+		} else {
+			download_percent(downloaded, total)
+				.map_or_else(|| dialog.pulse(None), |percent| dialog.update(percent, None))
+		};
 		if !keep_going {
-			// Signal the download thread to abort immediately instead of letting the transfer
-			// run to completion (or its 10-minute timeout) unattended in the background.
 			progress.cancelled.store(true, Ordering::Relaxed);
-			if let Some(dialog) = p.borrow().as_ref() {
-				dialog.update(100, None);
-			}
-			*p.borrow_mut() = None;
+			p.clear();
 		}
+		// Dropping `update` invokes any completion queued during the native event-loop yield,
+		// after Update/Pulse returns and its reference to the dialog is released.
 	});
 }
 
-fn install_update(config: &UpdaterConfig, parent: ParentWindow, download: Result<PathBuf, UpdateError>) {
-	let outcome =
-		download.map_err(|e| format!("{}: {e}", t("Update failed"))).and_then(|path| platform::install(config, &path));
+fn install_update(parent: ParentWindow, outcome: Result<InstallOutcome, String>, on_exit: Box<dyn FnOnce() + Send>) {
 	match outcome {
-		Ok(InstallOutcome::Exit) => process::exit(0),
+		Ok(InstallOutcome::Exit) => on_exit(),
+		#[cfg(target_os = "macos")]
+		Ok(InstallOutcome::Prepared(update)) => match update.commit() {
+			Ok(()) => on_exit(),
+			Err(msg) => show_message(parent, &msg, &t("Error"), MessageDialogStyle::IconError),
+		},
 		Ok(InstallOutcome::ManualStep(msg)) => {
 			show_message(parent, &msg, &t("Update Ready"), MessageDialogStyle::IconInformation);
 		}
