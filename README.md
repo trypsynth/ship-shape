@@ -30,7 +30,7 @@ Each platform's asset names, download folder, and install flow live in one file 
 
 ```toml
 [dependencies]
-ship-shape = "0.3.0"
+ship-shape = "0.4.0"
 ```
 
 ```rust

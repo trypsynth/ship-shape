@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "ship-shape"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "homeport",
  "minisign-verify",

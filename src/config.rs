@@ -21,6 +21,7 @@ impl From<homeport::InstallKind> for InstallKind {
 
 /// Configuration for the updater. Construct once and pass to all ship-shape functions.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UpdaterConfig {
 	/// GitHub repository in `"owner/repo"` format.
 	pub github_repo: String,
