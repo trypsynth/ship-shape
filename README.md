@@ -98,10 +98,13 @@ that identity, fixtures are ad-hoc signed and demonstrate the manual fallback in
 trusts only its generated local fixture and keeps the production signer checks. It is a repository
 test harness, excluded from the published crate package.
 
-The download gauge stays below 100 until verification and preparation finish. Native progress
-updates can yield to the event loop, so completion waits for the active Update/Pulse call to
-return before destroying the dialog or calling the shutdown handler. Regression tests cover this
-ordering without requiring a graphical session.
+The download window comes from the `progress` module of
+[wx-utils](https://github.com/trypsynth/wx-utils). Its gauge stays below 100 until verification
+and preparation finish. Native progress updates can yield to the event loop, so completion waits
+for the active Update/Pulse call to return before destroying the dialog or calling the shutdown
+handler. wx-utils' regression tests cover this ordering without requiring a graphical session.
+wx-utils shows one progress window at a time, so a download that starts while the application
+shows another one waits for it.
 
 Run `cargo test` on macOS for coverage of cancellation, helper timeouts, replacement and rollback,
 failed restore and launch, competing destination changes, protected locations, bundle selection,

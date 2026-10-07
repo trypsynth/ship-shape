@@ -1,14 +1,15 @@
 use std::{
+	path::PathBuf,
 	process, ptr,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicBool, Ordering},
 	},
 	thread,
-	time::Duration,
 };
 
 use patois::t;
+use wx_utils::progress::{Ended, Progress, run_with_progress};
 use wxdragon::{ffi, prelude::*, window::WxWidget};
 
 pub use self::markdown::markdown_to_text;
@@ -19,15 +20,6 @@ use crate::{
 };
 
 mod markdown;
-mod progress;
-
-use progress::{ProgressLifecycle, download_percent};
-
-const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
-
-thread_local! {
-	static ACTIVE_PROGRESS: ProgressLifecycle<ProgressDialog> = const { ProgressLifecycle::new() };
-}
 
 /// Guards against a second update-check flow (silent startup check, manual "Check for
 /// Updates", or an impatient double-click while a download is stuck) from starting while
@@ -76,16 +68,6 @@ pub enum CheckTrigger {
 	Automatic,
 	/// The user asked for the check. "Up to date" and errors also show a dialog.
 	Manual,
-}
-
-#[derive(Default)]
-struct DownloadProgress {
-	downloaded: AtomicU64,
-	total: AtomicU64,
-	finished: AtomicBool,
-	#[cfg(target_os = "macos")]
-	preparing: AtomicBool,
-	cancelled: AtomicBool,
 }
 
 /// Show the "update available" dialog and return `true` if the user accepted.
@@ -203,99 +185,56 @@ fn start_download(
 	on_exit: Box<dyn FnOnce() + Send>,
 ) {
 	let title = t("%s Update").replace("%s", &config.app_display_name);
-	let progress_dialog = ProgressDialog::builder(&parent, &title, &t("Downloading update..."), 100)
-		.with_style(
-			ProgressDialogStyle::AutoHide
-				| ProgressDialogStyle::AppModal
-				| ProgressDialogStyle::RemainingTime
-				| ProgressDialogStyle::CanAbort,
-		)
-		.build();
-	ACTIVE_PROGRESS.with(|p| p.set(progress_dialog));
-	let progress = Arc::new(DownloadProgress::default());
-	spawn_progress_heartbeat(Arc::clone(&progress));
-	thread::spawn(move || {
-		let download =
-			download_update_file(&config, &result.download_url, &result.signature_url, &progress.cancelled, |d, t| {
-				progress.downloaded.store(d, Ordering::Relaxed);
-				progress.total.store(t, Ordering::Relaxed);
-			});
-		#[cfg(target_os = "macos")]
-		let download = if progress.cancelled.load(Ordering::Relaxed) {
-			if let Ok(ref path) = download {
-				platform::remove_private_download(path);
+	#[cfg(not(target_os = "macos"))]
+	let install_config = Arc::clone(&config);
+	#[cfg(not(target_os = "macos"))]
+	let work = move |progress: &Progress| fetch(&config, &result, progress);
+	#[cfg(target_os = "macos")]
+	let work = move |progress: &Progress| prepare(&config, fetch(&config, &result, progress), progress);
+	run_with_progress(&parent, &title, &t("Downloading update..."), work, move |download, ended| {
+		if ended == Ended::Completed {
+			#[cfg(not(target_os = "macos"))]
+			let download = download
+				.map_err(|e| format!("{}: {e}", t("Update failed")))
+				.and_then(|path| platform::install(&install_config, &path));
+			install_update(parent, download, on_exit);
+		}
+		drop(check);
+	});
+}
+
+/// Downloads and verifies the update, moving the download window's gauge as it goes.
+fn fetch(config: &UpdaterConfig, result: &UpdateAvailableResult, progress: &Progress) -> Result<PathBuf, UpdateError> {
+	download_update_file(config, &result.download_url, &result.signature_url, progress.cancel_flag(), |done, total| {
+		progress.set(done, Some(total));
+	})
+}
+
+/// Prepares the downloaded update for installation, while the download window pulses.
+#[cfg(target_os = "macos")]
+fn prepare(
+	config: &UpdaterConfig,
+	download: Result<PathBuf, UpdateError>,
+	progress: &Progress,
+) -> Result<InstallOutcome, String> {
+	if progress.is_cancelled() {
+		if let Ok(ref path) = download {
+			platform::remove_private_download(path);
+		}
+		Err(t("Update cancelled."))
+	} else {
+		download.map_err(|e| format!("{}: {e}", t("Update failed"))).and_then(|path| {
+			progress.set_message(&t("Preparing update..."));
+			progress.set(0, None);
+			let result = platform::install_with_cancel(config, &path, progress.cancel_flag());
+			// A manual fallback still needs its DMG. Automatic preparation has copied the
+			// bundle, so its private verified download can be removed.
+			if !matches!(result, Ok(InstallOutcome::ManualStep(_))) {
+				platform::remove_private_download(&path);
 			}
-			Err(t("Update cancelled."))
-		} else {
-			download.map_err(|e| format!("{}: {e}", t("Update failed"))).and_then(|path| {
-				progress.preparing.store(true, Ordering::Relaxed);
-				let result = platform::install_with_cancel(&config, &path, &progress.cancelled);
-				// A manual fallback still needs its DMG. Automatic preparation has copied the
-				// bundle, so its private verified download can be removed.
-				if !matches!(result, Ok(InstallOutcome::ManualStep(_))) {
-					platform::remove_private_download(&path);
-				}
-				result
-			})
-		};
-		progress.finished.store(true, Ordering::Relaxed);
-		wxdragon::call_after(Box::new(move || {
-			ACTIVE_PROGRESS.with(|p| {
-				p.finish(Box::new(move || {
-					ACTIVE_PROGRESS.with(ProgressLifecycle::clear);
-					if !progress.cancelled.load(Ordering::Relaxed) {
-						#[cfg(not(target_os = "macos"))]
-						let download = download
-							.map_err(|e| format!("{}: {e}", t("Update failed")))
-							.and_then(|path| platform::install(&config, &path));
-						install_update(parent, download, on_exit);
-					}
-					drop(check);
-				}));
-			});
-		}));
-		wxdragon::wake_up_idle();
-	});
-}
-
-/// Updates the progress dialog from the main thread every [`PROGRESS_INTERVAL`] until the
-/// download finishes or is cancelled.
-fn spawn_progress_heartbeat(progress: Arc<DownloadProgress>) {
-	thread::spawn(move || {
-		while !progress.finished.load(Ordering::Relaxed) && !progress.cancelled.load(Ordering::Relaxed) {
-			let downloaded = progress.downloaded.load(Ordering::Relaxed);
-			let total = progress.total.load(Ordering::Relaxed);
-			let progress = Arc::clone(&progress);
-			wxdragon::call_after(Box::new(move || update_progress_dialog(&progress, downloaded, total)));
-			wxdragon::wake_up_idle();
-			thread::sleep(PROGRESS_INTERVAL);
-		}
-	});
-}
-
-fn update_progress_dialog(progress: &DownloadProgress, downloaded: u64, total: u64) {
-	ACTIVE_PROGRESS.with(|p| {
-		let Some(update) = p.begin_update() else {
-			return;
-		};
-		let dialog = update.dialog();
-		#[cfg(target_os = "macos")]
-		let preparing = progress.preparing.load(Ordering::Relaxed);
-		#[cfg(not(target_os = "macos"))]
-		let preparing = false;
-		let keep_going = if preparing {
-			dialog.pulse(Some(&t("Preparing update...")))
-		} else {
-			download_percent(downloaded, total)
-				.map_or_else(|| dialog.pulse(None), |percent| dialog.update(percent, None))
-		};
-		if !keep_going {
-			progress.cancelled.store(true, Ordering::Relaxed);
-			p.clear();
-		}
-		// Dropping `update` invokes any completion queued during the native event-loop yield,
-		// after Update/Pulse returns and its reference to the dialog is released.
-	});
+			result
+		})
+	}
 }
 
 fn install_update(parent: ParentWindow, outcome: Result<InstallOutcome, String>, on_exit: Box<dyn FnOnce() + Send>) {
