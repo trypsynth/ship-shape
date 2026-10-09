@@ -21,8 +21,6 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 ureq = { version = "3.4.2", default-features = false, features = ["json", "rustls"] }
 wx-utils = "0.4.2"
-# default-features = false so this does not decide for the application
-# which parts of wxWidgets get built; nothing here needs any of them.
 wxdragon = { version = "0.9.22", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
