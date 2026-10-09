@@ -865,9 +865,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "patois"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d8a7a8ed1b780906a3ee4cfb797cf467c0a758176701c10fd783ca0f2d39938"
+checksum = "75b8d37756e8066067907b01d2cb1ffb7f2886707af4909280a523b2f98f59cc"
 dependencies = [
  "inventory",
  "patois-macros",
@@ -1223,6 +1223,7 @@ dependencies = [
  "serde",
  "tempfile",
  "ureq",
+ "wx-utils",
  "wxdragon",
 ]
 
@@ -1769,6 +1770,16 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wx-utils"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ec56dbb82e24c9eff07f9e637f5a44410a4166ac9c8f25fe0fce34d8c58d17"
+dependencies = [
+ "patois",
+ "wxdragon",
+]
 
 [[package]]
 name = "wxdragon"
