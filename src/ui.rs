@@ -259,12 +259,13 @@ fn install_update(parent: ParentWindow, outcome: Result<InstallOutcome, String>,
 	}
 }
 
+/// Arms the watchdog before the handler runs, so a handler that blocks is still covered.
 fn quit_for_install(on_exit: Box<dyn FnOnce() + Send>) {
-	on_exit();
 	thread::spawn(|| {
 		thread::sleep(EXIT_WATCHDOG);
 		process::exit(0);
 	});
+	on_exit();
 }
 
 /// The default exit: close the app's top-level window the normal way, so whatever its close handler
