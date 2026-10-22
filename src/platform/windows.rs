@@ -8,15 +8,14 @@ use std::{
 
 #[cfg(target_os = "windows")]
 use patois::t;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 #[cfg(target_os = "windows")]
 use super::InstallOutcome;
 use crate::{InstallKind, relaunch::RELAUNCH_ENV};
 #[cfg(target_os = "windows")]
 use crate::{UpdateError, UpdaterConfig};
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub const fn asset_name_parts(install_kind: InstallKind) -> (&'static str, &'static str) {
 	match install_kind {
@@ -56,7 +55,7 @@ pub fn install(config: &UpdaterConfig, path: &Path) -> Result<InstallOutcome, St
 	Command::new("powershell.exe")
 		.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
 		.arg(&script)
-		.creation_flags(CREATE_NO_WINDOW)
+		.creation_flags(CREATE_NO_WINDOW.0)
 		.spawn()
 		.map_err(|e| format!("{}: {e}", t("Failed to launch update script")))?;
 	Ok(InstallOutcome::Exit)
