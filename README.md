@@ -51,6 +51,32 @@ let config = Arc::new(
 ui::run_update_check(config, &frame, UpdateChannel::Stable, CheckTrigger::Manual);
 ```
 
+Once your main window is first shown at startup, let a relaunch after an update come to the front:
+
+```rust
+frame.show(true);
+ui::bring_to_front_after_update(&frame);
+```
+
+## Quitting for an update
+
+When an update is ready to install, the app has to quit so the helper can replace it.
+`run_update_check` closes `parent`'s top-level window the normal way, so its close handler runs
+and saves whatever it saves, then ends the event loop. To do more first, such as announcing the
+restart, use `ui::run_update_check_with_exit_handler` and quit from the handler. Either way, the
+handler runs on the UI thread only after the update is ready, and ship-shape ends the process
+itself if it is still running 15 seconds later, because the update cannot install until it has.
+Simply hiding the main window is not enough.
+
+## Coming back to the front
+
+Windows does not let a relaunched app take the foreground: its window opens behind whatever the
+user was doing. The Windows helper marks the app it relaunches, and
+`ui::bring_to_front_after_update(&window)` uses that mark to bring the window forward. On an
+ordinary start, and on other platforms, it does nothing. `ship_shape::relaunched_after_update()`
+answers whether this start was an update's relaunch, for apps that want to do something else with
+it; the mark is removed the first time it is read, so programs the app starts do not inherit it.
+
 ## Upgrading from 0.2
 
 - `UpdaterConfig::new` takes the current version instead of the user agent. The user agent
@@ -80,10 +106,8 @@ a failed restore or launch preserves the backup and reports its location. Failur
 cleanup under `~/Library/Logs/ship-shape-update-*.log`; successful and canceled updates remove
 their logs. A successful Launch Services request does not detect subsequent application crashes.
 
-Use `ui::run_update_check_with_exit_handler` to save state and terminate normally. The existing
-`run_update_check` entry point keeps its immediate process-exit behavior. The handler runs on the
-UI thread only after successful installer preparation. It must terminate the process within
-60 seconds; simply hiding the main window is insufficient.
+The app quits as described in [Quitting for an update](#quitting-for-an-update), only after
+successful installer preparation, well within the helper's 60 seconds.
 
 `UpdaterConfig::with_macos_relaunch_env(name, value)` preserves an explicit environment override
 when launching through macOS `open`, such as an isolated settings directory. It is ignored on

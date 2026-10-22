@@ -11,7 +11,7 @@ use patois::t;
 
 #[cfg(target_os = "windows")]
 use super::InstallOutcome;
-use crate::InstallKind;
+use crate::{InstallKind, relaunch::RELAUNCH_ENV};
 #[cfg(target_os = "windows")]
 use crate::{UpdateError, UpdaterConfig};
 
@@ -40,7 +40,7 @@ pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 }
 
 /// Start a hidden PowerShell script that waits for this process to exit, applies the update,
-/// and relaunches the app.
+/// and relaunches the app, marked so it knows an update started it.
 #[cfg(target_os = "windows")]
 pub fn install(config: &UpdaterConfig, path: &Path) -> Result<InstallOutcome, String> {
 	let current_exe = env::current_exe().map_err(|e| format!("{}: {e}", t("Failed to get current exe path")))?;
@@ -62,6 +62,34 @@ pub fn install(config: &UpdaterConfig, path: &Path) -> Result<InstallOutcome, St
 	Ok(InstallOutcome::Exit)
 }
 
+/// Brings the window whose native handle is `hwnd` to the front, returning whether Windows agreed.
+///
+/// Windows only lets a window take the foreground from the foreground process or one it handed the
+/// right to, and a relaunched app is neither: the hidden script above starts it after the old
+/// instance has exited and any installer window has come and gone. Sharing input state with the
+/// thread that owns the foreground window, for the length of the call, is what lets
+/// `SetForegroundWindow` through. Only for a relaunch the user asked for, never an ordinary start.
+#[cfg(target_os = "windows")]
+pub fn bring_to_front(hwnd: *mut std::ffi::c_void) -> bool {
+	use windows::Win32::{
+		Foundation::HWND,
+		System::Threading::{AttachThreadInput, GetCurrentThreadId},
+		UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow},
+	};
+	if hwnd.is_null() {
+		return false;
+	}
+	let ours = unsafe { GetCurrentThreadId() };
+	let foreground = unsafe { GetForegroundWindow() };
+	let theirs = if foreground.is_invalid() { 0 } else { unsafe { GetWindowThreadProcessId(foreground, None) } };
+	let attached = theirs != 0 && theirs != ours && unsafe { AttachThreadInput(ours, theirs, true) }.as_bool();
+	let raised = unsafe { SetForegroundWindow(HWND(hwnd)) }.as_bool();
+	if attached {
+		let _ = unsafe { AttachThreadInput(ours, theirs, false) };
+	}
+	raised
+}
+
 fn ps_quote(s: &str) -> String {
 	format!("'{}'", s.replace('\'', "''"))
 }
@@ -74,7 +102,7 @@ fn installer_script(pid: u32, installer_args: &[String], installer: &str, curren
 		format!(" -ArgumentList {args}")
 	};
 	format!(
-		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath {}{arg_clause} -Wait; Start-Process -FilePath {}",
+		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath {}{arg_clause} -Wait; $env:{RELAUNCH_ENV}='1'; Start-Process -FilePath {}",
 		ps_quote(installer),
 		ps_quote(current_exe)
 	)
@@ -82,7 +110,7 @@ fn installer_script(pid: u32, installer_args: &[String], installer: &str, curren
 
 fn zip_update_script(pid: u32, zip: &str, dest_dir: &str, current_exe: &str) -> String {
 	format!(
-		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Expand-Archive -Path {zip_q} -DestinationPath {dest_q} -Force; Remove-Item -Path {zip_q} -Force; Start-Process {exe_q}",
+		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Expand-Archive -Path {zip_q} -DestinationPath {dest_q} -Force; Remove-Item -Path {zip_q} -Force; $env:{RELAUNCH_ENV}='1'; Start-Process {exe_q}",
 		zip_q = ps_quote(zip),
 		dest_q = ps_quote(dest_dir),
 		exe_q = ps_quote(current_exe)
@@ -114,7 +142,7 @@ mod tests {
 		let script = installer_script(42, &["/S".to_string()], r"C:\Temp\app_setup.exe", r"C:\App\app.exe");
 		assert_eq!(
 			script,
-			r"Start-Sleep -Seconds 1; Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Temp\app_setup.exe' -ArgumentList '/S' -Wait; Start-Process -FilePath 'C:\App\app.exe'"
+			r"Start-Sleep -Seconds 1; Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Temp\app_setup.exe' -ArgumentList '/S' -Wait; $env:SHIP_SHAPE_RELAUNCHED='1'; Start-Process -FilePath 'C:\App\app.exe'"
 		);
 	}
 
@@ -150,5 +178,14 @@ mod tests {
 		);
 		assert!(script.contains(r"Remove-Item -Path 'C:\Users\O''Brien\app.zip' -Force"));
 		assert!(script.contains(r"Start-Process 'C:\Users\O''Brien\app.exe'"));
+	}
+
+	/// The installer runs before the marker is set, so only the relaunched app inherits it.
+	#[test]
+	fn both_scripts_mark_only_the_relaunched_app() {
+		let installer = installer_script(7, &[], r"C:\t\s.exe", r"C:\a\a.exe");
+		assert!(installer.contains(r"-Wait; $env:SHIP_SHAPE_RELAUNCHED='1'; Start-Process -FilePath 'C:\a\a.exe'"));
+		let zip = zip_update_script(7, r"C:\a\a.zip", r"C:\a", r"C:\a\a.exe");
+		assert!(zip.contains(r"-Force; $env:SHIP_SHAPE_RELAUNCHED='1'; Start-Process 'C:\a\a.exe'"));
 	}
 }

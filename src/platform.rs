@@ -18,7 +18,7 @@ pub use macos::{asset_name_parts, download_dir, install, install_with_cancel, re
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub use other::{asset_name_parts, download_dir, install};
 #[cfg(target_os = "windows")]
-pub use windows::{asset_name_parts, download_dir, install};
+pub use windows::{asset_name_parts, bring_to_front, download_dir, install};
 
 /// What the caller must do after a successful [`install`].
 #[allow(dead_code, reason = "each platform constructs only some variants")]

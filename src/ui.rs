@@ -6,6 +6,7 @@ use std::{
 		atomic::{AtomicBool, Ordering},
 	},
 	thread,
+	time::Duration,
 };
 
 use patois::t;
@@ -27,6 +28,9 @@ mod markdown;
 /// file and a completing stale check can silently destroy the progress dialog belonging to
 /// a newer one.
 static UPDATE_CHECK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// How long the app gets to quit after its exit handler runs before ship-shape ends the process. The helper that installs the update waits on this process with no timeout, so a shutdown that stalls would stall the update with it.
+const EXIT_WATCHDOG: Duration = Duration::from_secs(15);
 
 /// Proof that this flow owns [`UPDATE_CHECK_ACTIVE`]. Releases it when dropped, so every exit
 /// path of the flow frees the next check.
@@ -128,13 +132,16 @@ pub fn run_update_check(
 	channel: UpdateChannel,
 	trigger: CheckTrigger,
 ) {
-	run_update_check_with_exit_handler(config, parent, channel, trigger, || process::exit(0));
+	let app_window = ParentWindow::new(parent);
+	run_update_check_with_exit_handler(config, parent, channel, trigger, move || close_app(app_window));
 }
 
-/// Like [`run_update_check`], but calls `on_exit` on the UI thread when an installer is ready.
+/// Like [`run_update_check`], but calls `on_exit` on the UI thread when an installer is ready,
+/// instead of closing `parent`'s top-level window.
 ///
-/// The handler must save application state and terminate the process. macOS installation is
-/// cancelled if the host does not exit within 60 seconds. It is not called on failure or cancel.
+/// The handler should save application state and quit. If the process is still running 15 seconds
+/// later, ship-shape ends it, since the update cannot install until it has. It is not called on
+/// failure or cancel.
 pub fn run_update_check_with_exit_handler(
 	config: Arc<UpdaterConfig>,
 	parent: &dyn WxWidget,
@@ -239,16 +246,55 @@ fn prepare(
 
 fn install_update(parent: ParentWindow, outcome: Result<InstallOutcome, String>, on_exit: Box<dyn FnOnce() + Send>) {
 	match outcome {
-		Ok(InstallOutcome::Exit) => on_exit(),
+		Ok(InstallOutcome::Exit) => quit_for_install(on_exit),
 		#[cfg(target_os = "macos")]
 		Ok(InstallOutcome::Prepared(update)) => match update.commit() {
-			Ok(()) => on_exit(),
+			Ok(()) => quit_for_install(on_exit),
 			Err(msg) => show_message(parent, &msg, &t("Error"), MessageDialogStyle::IconError),
 		},
 		Ok(InstallOutcome::ManualStep(msg)) => {
 			show_message(parent, &msg, &t("Update Ready"), MessageDialogStyle::IconInformation);
 		}
 		Err(msg) => show_message(parent, &msg, &t("Error"), MessageDialogStyle::IconError),
+	}
+}
+
+fn quit_for_install(on_exit: Box<dyn FnOnce() + Send>) {
+	on_exit();
+	thread::spawn(|| {
+		thread::sleep(EXIT_WATCHDOG);
+		process::exit(0);
+	});
+}
+
+/// The default exit: close the app's top-level window the normal way, so whatever its close handler
+/// saves is saved, then end the event loop in case closing it does not.
+fn close_app(window: ParentWindow) {
+	let mut top = window.get_parent();
+	while let Some(parent) = top.as_ref().and_then(WxWidget::get_parent) {
+		top = Some(parent);
+	}
+	top.map_or_else(|| window.close(true), |top| top.close(true));
+	if let Some(app) = wxdragon::app::get_app_instance() {
+		app.exit_main_loop();
+	}
+}
+
+/// Brings `window` to the front when an update has just relaunched the app, returning whether it
+/// did. Call it once, after the main window is first shown.
+///
+/// Windows does not let a relaunched app take the foreground by itself, so without this its window
+/// opens behind whatever the user was doing. It does nothing on an ordinary start, and nothing on
+/// other platforms.
+pub fn bring_to_front_after_update(window: &dyn WxWidget) -> bool {
+	#[cfg(target_os = "windows")]
+	{
+		crate::relaunched_after_update() && platform::bring_to_front(window.get_handle())
+	}
+	#[cfg(not(target_os = "windows"))]
+	{
+		let _ = window;
+		false
 	}
 }
 
