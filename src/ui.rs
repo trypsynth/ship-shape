@@ -29,7 +29,9 @@ mod markdown;
 /// a newer one.
 static UPDATE_CHECK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// How long the app gets to quit after its exit handler runs before ship-shape ends the process. The helper that installs the update waits on this process with no timeout, so a shutdown that stalls would stall the update with it.
+/// How long the app gets to quit after its exit handler runs before ship-shape ends the process.
+/// The helper that installs the update waits on this process with no timeout, so a shutdown that
+/// stalls would stall the update with it.
 const EXIT_WATCHDOG: Duration = Duration::from_secs(15);
 
 /// Proof that this flow owns [`UPDATE_CHECK_ACTIVE`]. Releases it when dropped, so every exit
@@ -170,6 +172,24 @@ pub fn run_update_check_with_exit_handler(
 	});
 }
 
+/// Brings `window` to the front when an update has just relaunched the app, returning whether it
+/// did. Call it once, after the main window is first shown.
+///
+/// Windows does not let a relaunched app take the foreground by itself, so without this its window
+/// opens behind whatever the user was doing. It does nothing on an ordinary start, and nothing on
+/// other platforms.
+pub fn bring_to_front_after_update(window: &dyn WxWidget) -> bool {
+	#[cfg(target_os = "windows")]
+	{
+		crate::relaunched_after_update() && platform::bring_to_front(window.get_handle())
+	}
+	#[cfg(not(target_os = "windows"))]
+	{
+		let _ = window;
+		false
+	}
+}
+
 fn offer_update(
 	config: Arc<UpdaterConfig>,
 	check: ActiveCheck,
@@ -278,24 +298,6 @@ fn close_app(window: ParentWindow) {
 	top.map_or_else(|| window.close(true), |top| top.close(true));
 	if let Some(app) = wxdragon::app::get_app_instance() {
 		app.exit_main_loop();
-	}
-}
-
-/// Brings `window` to the front when an update has just relaunched the app, returning whether it
-/// did. Call it once, after the main window is first shown.
-///
-/// Windows does not let a relaunched app take the foreground by itself, so without this its window
-/// opens behind whatever the user was doing. It does nothing on an ordinary start, and nothing on
-/// other platforms.
-pub fn bring_to_front_after_update(window: &dyn WxWidget) -> bool {
-	#[cfg(target_os = "windows")]
-	{
-		crate::relaunched_after_update() && platform::bring_to_front(window.get_handle())
-	}
-	#[cfg(not(target_os = "windows"))]
-	{
-		let _ = window;
-		false
 	}
 }
 
