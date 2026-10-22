@@ -17,7 +17,8 @@ pub struct ReleaseAsset {
 pub struct GithubRelease {
 	pub tag_name: String,
 	pub body: Option<String>,
-	assets: Option<Vec<ReleaseAsset>>,
+	#[serde(default)]
+	assets: Vec<ReleaseAsset>,
 }
 
 /// URLs of a release asset and its minisign signature.
@@ -46,15 +47,13 @@ fn fetch_release(config: &UpdaterConfig, url: &str) -> Result<GithubRelease, Upd
 }
 
 pub fn require_asset_pair(config: &UpdaterConfig, release: &GithubRelease) -> Result<AssetPair, UpdateError> {
-	match release.assets.as_deref() {
-		Some(assets) if !assets.is_empty() => {
-			let (prefix, ext) = platform::asset_name_parts(config.install_kind);
-			pick_asset_pair(&config.app_name, config.effective_asset_suffix(), prefix, ext, assets).ok_or_else(|| {
-				UpdateError::NoDownload(t("Update is available but no matching download asset or signature was found."))
-			})
-		}
-		_ => Err(UpdateError::NoDownload(t("Latest release does not include downloadable assets."))),
+	if release.assets.is_empty() {
+		return Err(UpdateError::NoDownload(t("Latest release does not include downloadable assets.")));
 	}
+	let (prefix, ext) = platform::asset_name_parts(config.install_kind);
+	pick_asset_pair(&config.app_name, config.effective_asset_suffix(), prefix, ext, &release.assets).ok_or_else(|| {
+		UpdateError::NoDownload(t("Update is available but no matching download asset or signature was found."))
+	})
 }
 
 fn pick_asset_pair(
