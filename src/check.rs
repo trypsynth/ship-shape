@@ -1,3 +1,5 @@
+use patois::t;
+
 use crate::{
 	UpdateError, UpdaterConfig,
 	github::{self, AssetPair, GithubRelease},
@@ -57,10 +59,10 @@ pub fn check_for_updates(config: &UpdaterConfig, channel: UpdateChannel) -> Resu
 
 fn check_stable(config: &UpdaterConfig) -> Result<UpdateCheckOutcome, UpdateError> {
 	let current = parse_semver(&config.current_version)
-		.ok_or_else(|| UpdateError::InvalidVersion("Current version is not a valid semver.".to_string()))?;
+		.ok_or_else(|| UpdateError::InvalidVersion(t("Current version is not a valid semver.")))?;
 	let release = github::fetch_latest_release(config)?;
 	let latest = parse_semver(&release.tag_name)
-		.ok_or_else(|| UpdateError::InvalidResponse("Latest release tag is not a valid semver.".to_string()))?;
+		.ok_or_else(|| UpdateError::InvalidResponse(t("Latest release tag is not a valid semver.")))?;
 	if current >= latest {
 		return Ok(UpdateCheckOutcome::UpToDate(release.tag_name));
 	}

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use patois::t;
 use serde::Deserialize;
 
 use crate::{UpdateError, UpdaterConfig, http, platform};
@@ -41,7 +42,7 @@ fn fetch_release(config: &UpdaterConfig, url: &str) -> Result<GithubRelease, Upd
 		.call()?
 		.body_mut()
 		.read_json::<GithubRelease>()
-		.map_err(|e| UpdateError::InvalidResponse(format!("Failed to parse release JSON: {e}")))
+		.map_err(|e| UpdateError::InvalidResponse(format!("{}: {e}", t("Failed to parse release JSON"))))
 }
 
 pub fn require_asset_pair(config: &UpdaterConfig, release: &GithubRelease) -> Result<AssetPair, UpdateError> {
@@ -49,12 +50,10 @@ pub fn require_asset_pair(config: &UpdaterConfig, release: &GithubRelease) -> Re
 		Some(assets) if !assets.is_empty() => {
 			let (prefix, ext) = platform::asset_name_parts(config.install_kind);
 			pick_asset_pair(&config.app_name, config.effective_asset_suffix(), prefix, ext, assets).ok_or_else(|| {
-				UpdateError::NoDownload(
-					"Update is available but no matching download asset or signature was found.".to_string(),
-				)
+				UpdateError::NoDownload(t("Update is available but no matching download asset or signature was found."))
 			})
 		}
-		_ => Err(UpdateError::NoDownload("Latest release does not include downloadable assets.".to_string())),
+		_ => Err(UpdateError::NoDownload(t("Latest release does not include downloadable assets."))),
 	}
 }
 

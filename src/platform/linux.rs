@@ -37,14 +37,14 @@ pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 	match config.install_kind {
 		InstallKind::Installer => {
 			env::var("APPIMAGE")
-				.map_err(|_| UpdateError::Io("Not running from an AppImage; cannot self-update.".to_string()))?;
+				.map_err(|_| UpdateError::Io(t("Not running from an AppImage; cannot self-update.")))?;
 			cache_dir(config)
 		}
 		InstallKind::Portable => env::current_exe()
-			.map_err(|e| UpdateError::Io(format!("Failed to determine exe path: {e}")))?
+			.map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to determine exe path"))))?
 			.parent()
 			.map(Path::to_path_buf)
-			.ok_or_else(|| UpdateError::Io("Failed to get exe directory".to_string())),
+			.ok_or_else(|| UpdateError::Io(t("Failed to get exe directory"))),
 	}
 }
 
@@ -56,10 +56,10 @@ fn cache_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 		.map(PathBuf::from)
 		.or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
 		.ok_or_else(|| {
-			UpdateError::Io("Could not determine a cache directory: neither XDG_CACHE_HOME nor HOME is set".to_string())
+			UpdateError::Io(t("Could not determine a cache directory: neither XDG_CACHE_HOME nor HOME is set"))
 		})?;
 	let dir = base.join(&config.app_name);
-	fs::create_dir_all(&dir).map_err(|e| UpdateError::Io(format!("Failed to create cache directory: {e}")))?;
+	fs::create_dir_all(&dir).map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to create cache directory"))))?;
 	Ok(dir)
 }
 

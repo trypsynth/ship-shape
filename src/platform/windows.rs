@@ -32,10 +32,10 @@ pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 	match config.install_kind {
 		InstallKind::Installer => Ok(env::temp_dir()),
 		InstallKind::Portable => env::current_exe()
-			.map_err(|e| UpdateError::Io(format!("Failed to determine exe path: {e}")))?
+			.map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to determine exe path"))))?
 			.parent()
 			.map(Path::to_path_buf)
-			.ok_or_else(|| UpdateError::Io("Failed to get exe directory".to_string())),
+			.ok_or_else(|| UpdateError::Io(t("Failed to get exe directory"))),
 	}
 }
 

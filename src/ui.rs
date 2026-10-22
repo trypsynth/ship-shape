@@ -161,7 +161,7 @@ pub fn run_update_check_with_exit_handler(
 			Ok(UpdateCheckOutcome::UpToDate(version)) if trigger == CheckTrigger::Manual => {
 				show_up_to_date(parent, &version);
 			}
-			Err(e) if trigger == CheckTrigger::Manual => show_check_error(parent, &e),
+			Err(e) if trigger == CheckTrigger::Manual => show_error(parent, &e),
 			Ok(UpdateCheckOutcome::UpToDate(_)) | Err(_) => {}
 		}));
 		// call_after only enqueues; an otherwise idle event loop may not drain
@@ -201,10 +201,11 @@ fn start_download(
 	run_with_progress(&parent, &title, &t("Downloading update..."), work, move |download, ended| {
 		if ended == Ended::Completed {
 			#[cfg(not(target_os = "macos"))]
-			let download = download
-				.map_err(|e| format!("{}: {e}", t("Update failed")))
-				.and_then(|path| platform::install(&install_config, &path));
-			install_update(parent, download, on_exit);
+			let download = download.map(|path| platform::install(&install_config, &path));
+			match download {
+				Ok(outcome) => install_update(parent, outcome, on_exit),
+				Err(e) => show_error(parent, &e),
+			}
 		}
 		drop(check);
 	});
@@ -217,31 +218,30 @@ fn fetch(config: &UpdaterConfig, result: &UpdateAvailableResult, progress: &Prog
 	})
 }
 
-/// Prepares the downloaded update for installation, while the download window pulses.
+/// Prepares the downloaded update for installation, while the download window pulses. The outer
+/// error is the download's; the inner result is the preparation's.
 #[cfg(target_os = "macos")]
 fn prepare(
 	config: &UpdaterConfig,
 	download: Result<PathBuf, UpdateError>,
 	progress: &Progress,
-) -> Result<InstallOutcome, String> {
+) -> Result<Result<InstallOutcome, String>, UpdateError> {
 	if progress.is_cancelled() {
 		if let Ok(ref path) = download {
 			platform::remove_private_download(path);
 		}
-		Err(t("Update cancelled."))
-	} else {
-		download.map_err(|e| format!("{}: {e}", t("Update failed"))).and_then(|path| {
-			progress.set_message(&t("Preparing update..."));
-			progress.set(0, None);
-			let result = platform::install_with_cancel(config, &path, progress.cancel_flag());
-			// A manual fallback still needs its DMG. Automatic preparation has copied the
-			// bundle, so its private verified download can be removed.
-			if !matches!(result, Ok(InstallOutcome::ManualStep(_))) {
-				platform::remove_private_download(&path);
-			}
-			result
-		})
+		return Err(UpdateError::Cancelled);
 	}
+	let path = download?;
+	progress.set_message(&t("Preparing update..."));
+	progress.set(0, None);
+	let result = platform::install_with_cancel(config, &path, progress.cancel_flag());
+	// A manual fallback still needs its DMG. Automatic preparation has copied the bundle, so its
+	// private verified download can be removed.
+	if !matches!(result, Ok(InstallOutcome::ManualStep(_))) {
+		platform::remove_private_download(&path);
+	}
+	Ok(result)
 }
 
 fn install_update(parent: ParentWindow, outcome: Result<InstallOutcome, String>, on_exit: Box<dyn FnOnce() + Send>) {
@@ -307,15 +307,30 @@ fn show_up_to_date(parent: ParentWindow, version: &str) {
 	show_message(parent, &msg, &t("Info"), MessageDialogStyle::IconInformation);
 }
 
-fn show_check_error(parent: ParentWindow, err: &UpdateError) {
-	let (msg, title) = match err {
-		UpdateError::Verification(m) => (
-			t("Security verification failed. The update might have been tampered with: %s").replace("%s", m),
-			t("Security Error"),
-		),
-		_ => (err.to_string(), t("Error")),
-	};
+fn show_error(parent: ParentWindow, err: &UpdateError) {
+	let (msg, title) = describe(err);
 	show_message(parent, &msg, &title, MessageDialogStyle::IconError);
+}
+
+/// What to tell the user about `err`, in their language, and the title of the dialog that says it.
+/// `UpdateError`'s own `Display` stays English, for logs.
+fn describe(err: &UpdateError) -> (String, String) {
+	let msg = match err {
+		UpdateError::Verification(detail) => {
+			return (
+				t("Security verification failed. The update might have been tampered with: %s").replace("%s", detail),
+				t("Security Error"),
+			);
+		}
+		UpdateError::Http(code) => t("The update server returned HTTP error %s.").replace("%s", &code.to_string()),
+		UpdateError::Network(detail) => t("Could not reach the update server: %s").replace("%s", detail),
+		UpdateError::Cancelled => t("Update cancelled."),
+		UpdateError::InvalidVersion(detail)
+		| UpdateError::InvalidResponse(detail)
+		| UpdateError::NoDownload(detail)
+		| UpdateError::Io(detail) => detail.clone(),
+	};
+	(msg, t("Error"))
 }
 
 fn show_message(parent: ParentWindow, msg: &str, title: &str, icon: MessageDialogStyle) {
@@ -323,4 +338,26 @@ fn show_message(parent: ParentWindow, msg: &str, title: &str, icon: MessageDialo
 		.with_style(MessageDialogStyle::OK | icon | MessageDialogStyle::Centre)
 		.build();
 	dialog.show_modal();
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A signature that fails during the download is the case the security wording exists for.
+	#[test]
+	fn a_failed_signature_check_is_reported_as_a_security_error() {
+		let (msg, title) = describe(&UpdateError::Verification("Signature verification failed".into()));
+		assert_eq!(title, "Security Error");
+		assert!(msg.ends_with("tampered with: Signature verification failed"));
+	}
+
+	#[test]
+	fn other_errors_are_plain_errors_with_their_details() {
+		assert_eq!(
+			describe(&UpdateError::Http(404)),
+			("The update server returned HTTP error 404.".into(), "Error".into())
+		);
+		assert_eq!(describe(&UpdateError::NoDownload("No asset.".into())).0, "No asset.");
+	}
 }

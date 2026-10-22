@@ -7,6 +7,7 @@ use std::{
 };
 
 use minisign_verify::{PublicKey, Signature};
+use patois::t;
 
 use crate::{UpdateError, UpdaterConfig, http, platform};
 
@@ -50,7 +51,7 @@ pub fn download_update_file(
 	mut progress_callback: impl FnMut(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
 	let public_key = PublicKey::from_base64(&config.minisign_public_key)
-		.map_err(|e| UpdateError::Verification(format!("Invalid public key: {e}")))?;
+		.map_err(|e| UpdateError::Verification(format!("{}: {e}", t("Invalid public key"))))?;
 	let http = http::agent(DOWNLOAD_TIMEOUT);
 	let signature_text = http
 		.get(signature_url)
@@ -58,9 +59,9 @@ pub fn download_update_file(
 		.call()?
 		.body_mut()
 		.read_to_string()
-		.map_err(|e| UpdateError::Network(format!("Failed to read signature: {e}")))?;
-	let signature =
-		Signature::decode(&signature_text).map_err(|e| UpdateError::Verification(format!("Invalid signature: {e}")))?;
+		.map_err(|e| UpdateError::Network(format!("{}: {e}", t("Failed to read signature"))))?;
+	let signature = Signature::decode(&signature_text)
+		.map_err(|e| UpdateError::Verification(format!("{}: {e}", t("Invalid signature"))))?;
 	check_cancelled(cancelled)?;
 	let resp = http.get(url).header("User-Agent", &config.user_agent).call()?;
 	let total_size = resp
@@ -75,12 +76,13 @@ pub fn download_update_file(
 	let private_dir = tempfile::Builder::new()
 		.prefix("ship-shape-download-")
 		.tempdir_in(&download_dir)
-		.map_err(|e| UpdateError::Io(format!("Failed to create private download directory: {e}")))?;
+		.map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to create private download directory"))))?;
 	#[cfg(target_os = "macos")]
 	let download_dir = private_dir.path();
 	let final_path = download_dir.join(file_name);
 	let temp = TempDownload(final_path.with_file_name(format!("{file_name}.tmp")));
-	let mut file = File::create(&temp.0).map_err(|e| UpdateError::Io(format!("Failed to create file: {e}")))?;
+	let mut file =
+		File::create(&temp.0).map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to create file"))))?;
 	let mut downloaded: u64 = 0;
 	let mut buffer = [0u8; CHUNK_SIZE];
 	let mut body = resp.into_body();
@@ -91,16 +93,18 @@ pub fn download_update_file(
 		if n == 0 {
 			break;
 		}
-		file.write_all(&buffer[..n]).map_err(|e| UpdateError::Io(format!("Failed to write file: {e}")))?;
+		file.write_all(&buffer[..n]).map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to write file"))))?;
 		downloaded += n as u64;
 		progress_callback(downloaded, total_size);
 	}
 	drop(file);
-	let data = fs::read(&temp.0).map_err(|e| UpdateError::Io(format!("Failed to read file for verification: {e}")))?;
+	let data = fs::read(&temp.0)
+		.map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to read file for verification"))))?;
 	public_key
 		.verify(&data, &signature, true)
-		.map_err(|e| UpdateError::Verification(format!("Signature verification failed: {e}")))?;
-	fs::rename(&temp.0, &final_path).map_err(|e| UpdateError::Io(format!("Failed to rename verified file: {e}")))?;
+		.map_err(|e| UpdateError::Verification(format!("{}: {e}", t("Signature verification failed"))))?;
+	fs::rename(&temp.0, &final_path)
+		.map_err(|e| UpdateError::Io(format!("{}: {e}", t("Failed to rename verified file"))))?;
 	#[cfg(target_os = "macos")]
 	let _ = private_dir.keep();
 	Ok(final_path)
